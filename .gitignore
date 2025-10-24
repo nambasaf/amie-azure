@@ -1,0 +1,16 @@
+# Node
+node_modules/
+# Build output
+dist/
+# Logs
+npm-debug.log*
+# Environment
+.env*
+# macOS
+.DS_Store
+# Python virtualenv
+.venv/
+# Azure Functions local settings
+local.settings.json
+# VSCode
+.vscode/
