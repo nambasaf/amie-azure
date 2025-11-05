@@ -3,6 +3,22 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+.vscode/
+
+# OS-specific junk
+.DS_Store
+Thumbs.db
+
+# Build / cache output from Vite
+dist/
+.vite/
+
+# Log files
+*.log
+
+# Temporary environment files
+.env.*
+
 # C extensions
 *.so
 
