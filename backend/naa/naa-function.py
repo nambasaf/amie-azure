@@ -34,7 +34,7 @@ def get_manuscript_text(blob_name: str) -> str:
         return ""
 
 
-# === PRIOR ART SEARCH (REAL — NO MOCK) ===
+# === PRIOR ART SEARCH ===
 def search_prior_art(query: str) -> list:
     """
     REAL SEARCH — will be replaced with:
