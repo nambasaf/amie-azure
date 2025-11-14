@@ -77,11 +77,9 @@ Follow these rules strictly:
 """
 
 # Create the IDCA agent
-idca_agent = agents_client.create_agent(
-    model=MODEL_DEPLOYMENT,
-    name="idca_agent",
-    instructions=IDCA_PROMPT
-)
+IDCA_AGENT_ID = os.getenv("IDCA_AGENT_ID")
+if not IDCA_AGENT_ID:
+    raise ValueError("Missing IDCA_AGENT_ID in .env")
 
 # ------------------- Helpers -------------------
 def get_manuscript_text(request_id: str) -> str:
@@ -144,8 +142,8 @@ def run_idca(request_id: str):
 
     # Start run
     run = agents_client.runs.create_and_process(
-        thread_id=thread.id,
-        agent_id=idca_agent.id
+    thread_id=thread.id,
+    agent_id=IDCA_AGENT_ID
     )
 
      # Retrieve messages after run completes
