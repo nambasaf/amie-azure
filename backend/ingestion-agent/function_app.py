@@ -33,7 +33,7 @@ except Exception:
     pass
 
 
-@app.route(route="upload", methods=["POST"])
+@app.route(route="upload", methods=["POST"]) 
 def upload(req: func.HttpRequest) -> func.HttpResponse:
     """
     Receives a file upload from the frontend, saves it to Azure Blob Storage,

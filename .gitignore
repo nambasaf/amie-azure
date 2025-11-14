@@ -3,7 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-.vscode/
 
 # OS-specific junk
 .DS_Store
