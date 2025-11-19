@@ -49,30 +49,70 @@ table = table_service.get_table_client(TABLE_NAME)
 IDCA_PROMPT = """
 You are the Invention Detection and Classification Agent (IDCA) in the AMIE system.
 
-Your task is to analyze a Source Manuscript (SM) and determine whether it discloses a concrete and useful Source Technology (ST).
+You analyze a Source Manuscript (SM) and determine whether it discloses a concrete and useful Source Technology (ST).
 
-Follow these rules strictly:
+Follow these rules exactly:
 
-1. Assess whether the SM describes a buildable, operational technology.
-2. If it describes only background theory, ideas, or speculation, return status_determination = "Absent" or "Implied".
-3. If the technology is clearly described, return status_determination = "Present".
-4. Generate an APA-style citation for the manuscript.
-5. If status_determination = "Present", list the scientific or engineering domains required to understand the technology (Fields Map).
-6. Return output **ONLY** in the following JSON format:
+===========================================
+1. STATUS DETERMINATION
+===========================================
+Determine:
+- “Present” if the SM discloses a concrete, buildable, operational technology.
+- “Implied” if a technology is suggested but incomplete.
+- “Absent” if no technology is disclosed.
+
+===========================================
+2. FIELDS MAP
+===========================================
+If status = Present:
+Return a short list of scientific or engineering fields required to understand the technology.
+
+===========================================
+3. SOURCE STRUCTURE (SS)
+===========================================
+If status = Present:
+Decompose the technology into 3–8 structural elements (not functions, not background).
+Each element must be:
+- A physical or computational module
+- A subsystem
+- A processing block
+- A real structural component
+
+Write them as a bullet list of nouns ONLY.
+
+Example:
+- Neural signal acquisition module
+- Spiking neural network processor
+- Closed-loop controller
+
+===========================================
+4. STRUCTURAL SYNOPSIS (One Sentence)
+===========================================
+Write a ONE-SENTENCE summary of the SS following:
+actor → operation → object/outcome
+
+Rules:
+- present tense
+- plain English
+- no performance claims
+- no background theory
+- must use ONLY SS element names
+
+===========================================
+5. OUTPUT FORMAT (MANDATORY)
+===========================================
+Return ONLY this JSON:
 
 {
-
   "status_determination": "Present | Implied | Absent",
-  "justification": "Short explanation supporting the determination.",
-  "source_citation": "APA formatted citation for the manuscript.",
-  "fields_map": [
-    "Field 1",
-    "Field 2",
-    "Field 3"
-  ],
-
-  "structural_synopsis": "1–3 sentence summary of the technology (only if Present)."
+  "justification": "Short explanation.",
+  "source_citation": "APA citation.",
+  "fields_map": ["Field 1", "Field 2"],
+  "source_structure": ["Element 1", "Element 2"],
+  "structural_synopsis": "One sentence."
 }
+
+Do NOT include any other text.
 
 """
 
@@ -115,8 +155,8 @@ def get_manuscript_text(request_id: str) -> str:
     
     return text
 
-# some are too large
 
+# some are too large
 def send_in_chunks(thread_id, text, chunk_size=5000):
     for i in range(0, len(text), chunk_size):
         agents_client.messages.create(
@@ -132,6 +172,13 @@ def run_idca(request_id: str):
 
     # Create a conversation thread
     thread = agents_client.threads.create()
+
+     # Send IDCA instructions
+    agents_client.messages.create(
+        thread_id=thread.id,
+        role=MessageRole.USER,
+        content=IDCA_PROMPT
+    )
 
     send_in_chunks(thread.id, manuscript)
     msgs = list(agents_client.messages.list(thread_id=thread.id))
@@ -152,9 +199,22 @@ def run_idca(request_id: str):
     for m in reversed(message_list):
         if m.role == "assistant" and m.text_messages:
             response = m.text_messages[-1].text.value
-            print("\n IDCA Output:\n")
+            
+            # Validate JSON
+            import json
+            try:
+                json.loads(response)
+            except:
+                raise RuntimeError("Invalid JSON in IDCA output")
+
+            # Save to table <- NAA needs this even though we have a waay to connect through Connected Agent
+            entity = table.get_entity("AMIE", request_id)
+            entity["idca_output"] = response
+            entity["status"] = "classified"
+            table.update_entity(entity)
+
+            print("\nIDCA Output:\n")
             print(response)
-            print("\n---------------------------------------\n")
             return response
 
     raise RuntimeError(" No assistant response returned.")
