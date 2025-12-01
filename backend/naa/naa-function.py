@@ -7,6 +7,7 @@ import datetime
 import json
 import fitz
 import re
+from .prior_art_open import search_prior_art  # prior_art_open.py is in NAA directory
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -32,19 +33,6 @@ def get_manuscript_text(blob_name: str) -> str:
     except Exception as e:
         logging.error(f"Text extraction failed: {e}")
         return ""
-
-
-# === PRIOR ART SEARCH ===
-def search_prior_art(query: str) -> list:
-    """
-    REAL SEARCH — will be replaced with:
-      - ScholarPy
-      - EPO Open Patent Services
-      - USPTO Patent Full-Text API
-    For now: return empty list → safe for production
-    """
-    logging.info(f"Searching EPO/USPO for: {query[:100]}...")
-    return []  # ← Real results go here
 
 
 # === POST /assess — START NAA ===
