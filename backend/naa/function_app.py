@@ -5,7 +5,7 @@ import datetime
 import json
 import re
 import io
-from prior_art_open import search_prior_art
+from backend.naa.prior_art_open import search_prior_art
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 

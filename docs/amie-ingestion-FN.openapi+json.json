@@ -1,0 +1,141 @@
+{
+    "openapi": "3.0.1",
+    "info": {
+        "title": "amie-ingestion-FN",
+        "description": "Import from \"amie-ingestion-FN\" Function App",
+        "version": "1.0"
+    },
+    "servers": [
+        {
+            "url": "https://amie-apim.azure-api.net/amie-ingestion-FN"
+        }
+    ],
+    "paths": {
+        "/upload": {
+            "post": {
+                "summary": "upload",
+                "operationId": "post-upload",
+                "responses": {
+                    "200": {
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/requests/{request_id}": {
+            "get": {
+                "summary": "get_request",
+                "operationId": "get-get-request",
+                "parameters": [
+                    {
+                        "name": "request_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": ""
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": ""
+                    }
+                }
+            },
+            "delete": {
+                "summary": "delete_request",
+                "operationId": "delete-delete-request",
+                "parameters": [
+                    {
+                        "name": "request_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": ""
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/requests/{request_id}/status": {
+            "get": {
+                "summary": "get_status",
+                "operationId": "get-get-status",
+                "parameters": [
+                    {
+                        "name": "request_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": ""
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/requests": {
+            "get": {
+                "summary": "list_requests",
+                "operationId": "get-list-requests",
+                "responses": {
+                    "200": {
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/requests/{request_id}/retry": {
+            "post": {
+                "summary": "retry_request",
+                "operationId": "post-retry-request",
+                "parameters": [
+                    {
+                        "name": "request_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": ""
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": ""
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "securitySchemes": {
+            "apiKeyHeader": {
+                "type": "apiKey",
+                "name": "Ocp-Apim-Subscription-Key",
+                "in": "header"
+            },
+            "apiKeyQuery": {
+                "type": "apiKey",
+                "name": "subscription-key",
+                "in": "query"
+            }
+        }
+    },
+    "security": [
+        {
+            "apiKeyHeader": []
+        },
+        {
+            "apiKeyQuery": []
+        }
+    ]
+}

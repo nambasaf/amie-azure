@@ -6,6 +6,8 @@ import os
 import uuid
 import datetime
 import json
+import tempfile
+from PyPDF2 import PdfReader
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -187,3 +189,101 @@ def get_status(req: func.HttpRequest) -> func.HttpResponse:
         )
     except Exception:
         return func.HttpResponse("Request not found", status_code=404)
+
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    """Extracts plain text from PDF bytes using PyPDF2."""
+    try:
+        # write PDF bytes to temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+
+        # extract text from PDF
+        reader = PdfReader(tmp_path)
+        extracted = []
+
+        for page in reader.pages:
+            text = page.extract_text()
+            if text:
+                extracted.append(text)
+
+        final_text = "\n".join(extracted).strip()
+        return final_text
+
+    except Exception as e:
+        logging.error(f"PDF text extraction failed: {e}")
+        raise
+
+
+@app.route(route="requests/{request_id}/file", methods=["GET"])
+def download_file(req: func.HttpRequest) -> func.HttpResponse:
+    """Return raw PDF bytes for the given request."""
+    request_id = req.route_params.get("request_id")
+    table_client = table_service.get_table_client(TABLE_NAME)
+
+    try:
+        # Lookup blob info from Table Storage
+        entity = table_client.get_entity(
+            partition_key="AMIE",
+            row_key=request_id
+        )
+        filename = entity["filename"]
+
+        # Download file bytes from blob
+        blob_client = container_client.get_blob_client(filename)
+        data = blob_client.download_blob().readall()
+
+        # Return PDF file bytes
+        return func.HttpResponse(
+            body=data,
+            mimetype="application/pdf",
+            status_code=200
+        )
+
+    except Exception as e:
+        logging.error(f"Download failed: {e}")
+        return func.HttpResponse(f"Error: {e}", status_code=500)
+    
+    
+@app.route(route="requests/{request_id}/text", methods=["GET"])
+def get_text(req: func.HttpRequest) -> func.HttpResponse:
+    """Return extracted text of the manuscript."""
+    request_id = req.route_params.get("request_id")
+    table_client = table_service.get_table_client(TABLE_NAME)
+
+    try:
+        # 1. Get metadata from table
+        entity = table_client.get_entity(
+            partition_key="AMIE",
+            row_key=request_id
+        )
+        filename = entity["filename"]
+
+        # 2. Download PDF bytes
+        blob_client = container_client.get_blob_client(filename)
+        pdf_bytes = blob_client.download_blob().readall()
+
+        # 3. Extract text
+        text = extract_pdf_text(pdf_bytes)
+
+        if not text:
+            return func.HttpResponse(
+                "Text extraction failed or returned empty text.",
+                status_code=422
+            )
+
+        # 4. Return JSON with the text
+        return func.HttpResponse(
+            json.dumps({
+                "request_id": request_id,
+                "filename": filename,
+                "text": text
+            }),
+            mimetype="application/json",
+            status_code=200
+        )
+
+    except Exception as e:
+        logging.error(f"Failed to extract text: {e}")
+        return func.HttpResponse(f"Error: {e}", status_code=500)
+

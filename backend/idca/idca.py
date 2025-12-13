@@ -1,4 +1,11 @@
 import os
+import sys
+# Ensure backend root directory is on import path
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.append(ROOT_DIR)
+
+
 from dotenv import load_dotenv
 from azure.ai.agents import AgentsClient
  # from azure.ai.agents.models import MessageRole, ListSortOrder
@@ -9,6 +16,9 @@ from azure.data.tables import TableServiceClient
 from azure.ai.agents.models import MessageRole
 from PyPDF2 import PdfReader
 import tempfile
+from aa import run_aggregation_agent
+
+
 
 # Load .env variables
 load_dotenv()
@@ -116,8 +126,9 @@ Do NOT include any other text.
 
 """
 
-# Create the IDCA agent
+# connect to our IDCA agent on Azure AI Foundry
 IDCA_AGENT_ID = os.getenv("IDCA_AGENT_ID")
+
 if not IDCA_AGENT_ID:
     raise ValueError("Missing IDCA_AGENT_ID in .env")
 
@@ -129,6 +140,7 @@ def get_manuscript_text(request_id: str) -> str:
         raise ValueError(f" No record found for request_id: {request_id}")
 
     filename = entity.get("filename")
+    print(entity["filename"])
     if not filename:
         raise ValueError(" filename missing in table record.")
 
@@ -203,11 +215,11 @@ def run_idca(request_id: str):
             # Validate JSON
             import json
             try:
-                json.loads(response)
+                idca_json = json.loads(response)
             except:
                 raise RuntimeError("Invalid JSON in IDCA output")
 
-            # Save to table <- NAA needs this even though we have a waay to connect through Connected Agent
+            # Save IDCA output to table
             entity = table.get_entity("AMIE", request_id)
             entity["idca_output"] = response
             entity["status"] = "classified"
@@ -215,13 +227,60 @@ def run_idca(request_id: str):
 
             print("\nIDCA Output:\n")
             print(response)
+
+            # -------------------------------
+            # CASE 1: NO INVENTION
+            # --> Skip NAA completely
+            # --> Only run Aggregation Agent
+            # -------------------------------
+            if idca_json.get("status_determination") != "Present":
+                print("\n -------- No invention detected — skipping NAA.")
+                print(" -------- Running Aggregation Agent directly...\n")
+
+                try:
+                    final_report = run_aggregation_agent(
+                        idca_output=idca_json,
+                        naa_output=None        # no NAA outputs
+                    )
+                except Exception as e:
+                    print("\n Aggregation Agent failed:", str(e))
+
+                return response
+
+            # -------------------------------
+            # CASE 2: INVENTION PRESENT
+            # --> Run NAA first
+            # --> Then run Aggregation Agent
+            # -------------------------------
+            try:
+                from naa_brain_MVP.naa_test import run_steps_8_to_12
+                manuscript_text = get_manuscript_text(request_id)
+
+                print("\n -------- Launching NAA pipeline for request:", request_id)
+                naa_outputs = run_steps_8_to_12(manuscript_text, response)
+
+                print("\n -------- Running Aggregation Agent...\n")
+                try:
+                    final_report = run_aggregation_agent(
+                        idca_output=idca_json,
+                        naa_output=naa_outputs
+                    )
+                except Exception as e:
+                    print("\n Aggregation Agent failed:", str(e))
+
+            except Exception as e:
+                print("\n NAA failed:", str(e))
+
             return response
 
-    raise RuntimeError(" No assistant response returned.")
+    raise RuntimeError("No assistant response returned.")
+
 
 
 # ------------------- CLI -------------------
 if __name__ == "__main__":
-    print("Enter a request_id from your uploaded manuscripts:")
-    request_id = input("> ").strip()
-    run_idca(request_id)
+    
+    run_idca("1d235a2f-f03c-4f71-ae92-a5f61de38d29")
+
+    # with No invention detected 
+    # run_idca("aa9a21b4-3a60-4e45-b0b5-684318ac985e")
