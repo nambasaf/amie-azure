@@ -110,17 +110,29 @@ celerybeat-schedule
 # SageMath parsed files
 *.sage.py
 
-# Environments
-.env
-**/.env
-.env*
+# -------------------------
+# Python virtual environments (ALL locations)
+# -------------------------
 
+# Root venvs
+.venv/
+.venv/**
+venv/
+venv/**
 env/
+env/**
+ENV/
 
+# Any nested venv anywhere in the repo
+**/.venv/
+**/.venv/**
+**/venv/
+**/venv/**
+**/env/
 
-
-
-
+# Backup envs
+env.bak/
+venv.bak/
 
 # Node dependencies
 node_modules/
@@ -148,8 +160,6 @@ bin
 obj
 appsettings.json
 local.settings.json
-**/local.settings.json
-
 
 # Azurite artifacts
 __blobstorage__
