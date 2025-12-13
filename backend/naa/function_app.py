@@ -1,50 +1,58 @@
 import azure.functions as func
-from azure.storage.blob import BlobServiceClient
-from azure.data.tables import TableServiceClient
 import logging
 import os
 import datetime
 import json
-import fitz
 import re
+import io
+from prior_art_open import search_prior_art
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
-# === SHARED STORAGE (IDCA writes here) ===
-INGESTION_STORAGE_CONN = os.getenv("AzureWebJobsStorage")
+# === SHARED CONSTANTS ===
 INGESTION_CONTAINER = "manuscript-uploads"
 INGESTION_TABLE = "IngestionRequests"
 
-blob_service = BlobServiceClient.from_connection_string(INGESTION_STORAGE_CONN)
-container_client = blob_service.get_container_client(INGESTION_CONTAINER)
-table_service = TableServiceClient.from_connection_string(INGESTION_STORAGE_CONN)
+
+# === LAZY STORAGE CLIENT HELPER ===
+def get_storage_clients():
+    conn_str = os.getenv("AzureWebJobsStorage")
+    if not conn_str:
+        raise ValueError("Missing AzureWebJobsStorage connection string")
+
+    # Import here to keep top-level light
+    from azure.storage.blob import BlobServiceClient
+    from azure.data.tables import TableServiceClient
+
+    blob_service = BlobServiceClient.from_connection_string(conn_str)
+    container_client = blob_service.get_container_client(INGESTION_CONTAINER)
+    table_service = TableServiceClient.from_connection_string(conn_str)
+
+    return container_client, table_service
 
 
 # === TEXT EXTRACTION (PDF → TEXT) ===
 def get_manuscript_text(blob_name: str) -> str:
     try:
+        container_client, _ = get_storage_clients()
         blob_client = container_client.get_blob_client(blob_name)
         data = blob_client.download_blob().readall()
+
         if not blob_name.lower().endswith(".pdf"):
             return ""
-        doc = fitz.open(stream=data, filetype="pdf")
-        return " ".join(page.get_text() for page in doc).strip()
+
+        from pypdf import PdfReader  # Lazy import
+
+        reader = PdfReader(io.BytesIO(data))
+        text = ""
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + " "
+        return text.strip()
     except Exception as e:
         logging.error(f"Text extraction failed: {e}")
         return ""
-
-
-# === PRIOR ART SEARCH ===
-def search_prior_art(query: str) -> list:
-    """
-    REAL SEARCH — will be replaced with:
-      - ScholarPy
-      - EPO Open Patent Services
-      - USPTO Patent Full-Text API
-    For now: return empty list → safe for production
-    """
-    logging.info(f"Searching EPO/USPO for: {query[:100]}...")
-    return []  # ← Real results go here
 
 
 # === POST /assess — START NAA ===
@@ -56,7 +64,9 @@ def start_assessment(req: func.HttpRequest) -> func.HttpResponse:
         if not request_id:
             return func.HttpResponse("Missing request_id", status_code=400)
 
+        _, table_service = get_storage_clients()
         ing_table = table_service.get_table_client(INGESTION_TABLE)
+
         try:
             entity = ing_table.get_entity("AMIE", request_id)
         except:
@@ -82,9 +92,12 @@ def start_assessment(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="assess/{request_id}", methods=["GET"])
 def get_assessment(req: func.HttpRequest) -> func.HttpResponse:
     request_id = req.route_params.get("request_id")
-    ing_table = table_service.get_table_client(INGESTION_TABLE)
+
     try:
+        _, table_service = get_storage_clients()
+        ing_table = table_service.get_table_client(INGESTION_TABLE)
         entity = ing_table.get_entity("AMIE", request_id)
+
         return func.HttpResponse(
             json.dumps(
                 {
@@ -95,7 +108,7 @@ def get_assessment(req: func.HttpRequest) -> func.HttpResponse:
                     "matches": json.loads(entity.get("matches", "[]")),
                     "reasoning": entity.get("reasoning", ""),
                     "blocking_reference": json.loads(
-                        entity.get("blocking_reference", "null")
+                        entity.get("blocking_reference", "null") or "null"
                     ),
                     "completed_at": entity.get("completed_at"),
                 },
@@ -111,9 +124,12 @@ def get_assessment(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="assess/{request_id}/status", methods=["GET"])
 def get_status(req: func.HttpRequest) -> func.HttpResponse:
     request_id = req.route_params.get("request_id")
-    ing_table = table_service.get_table_client(INGESTION_TABLE)
+
     try:
+        _, table_service = get_storage_clients()
+        ing_table = table_service.get_table_client(INGESTION_TABLE)
         entity = ing_table.get_entity("AMIE", request_id)
+
         return func.HttpResponse(
             json.dumps({"request_id": request_id, "status": entity.get("status")}),
             mimetype="application/json",
@@ -126,10 +142,12 @@ def get_status(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="worker/run/{request_id}", methods=["POST"])
 def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
     request_id = req.route_params.get("request_id")
-    ing_table = table_service.get_table_client(INGESTION_TABLE)
 
     try:
+        container_client, table_service = get_storage_clients()
+        ing_table = table_service.get_table_client(INGESTION_TABLE)
         entity = ing_table.get_entity("AMIE", request_id)
+
         filename = entity["filename"]
         filing_date = entity.get("filing_date", "2025-01-01")
 
@@ -192,6 +210,9 @@ def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error(f"NAA failed: {e}")
         try:
+            _, table_service = get_storage_clients()
+            ing_table = table_service.get_table_client(INGESTION_TABLE)
+            entity = ing_table.get_entity("AMIE", request_id)
             entity["status"] = "failed"
             entity["error"] = str(e)
             ing_table.update_entity(entity)
