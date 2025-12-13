@@ -112,16 +112,15 @@ celerybeat-schedule
 
 # Environments
 .env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+**/.env
+.env*
 
-# Python environments
-.venv/
-backend/ingestion-agent/.venv/
+env/
+
+
+
+
+
 
 # Node dependencies
 node_modules/
@@ -149,6 +148,8 @@ bin
 obj
 appsettings.json
 local.settings.json
+**/local.settings.json
+
 
 # Azurite artifacts
 __blobstorage__
