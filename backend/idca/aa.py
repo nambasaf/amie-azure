@@ -7,6 +7,9 @@ from dotenv import load_dotenv
 from azure.ai.agents import AgentsClient
 from azure.ai.agents.models import MessageRole
 from azure.identity import DefaultAzureCredential
+from utils.retry import retry_agent
+
+
 
 load_dotenv()
 
@@ -173,14 +176,49 @@ INSTRUCTIONS FOR FINAL REPORT:
 # -------------------------------------------------------------
 # MAIN FUNCTION CALLED BY IDCA
 # -------------------------------------------------------------
-def run_aggregation_agent(idca_output: dict, naa_output, naa_assessments=None):
+def run_aggregation_agent(idca_output: dict, naa_output, naa_assessments=None, request_id=None, table=None):
+    """
+    Runs the Aggregation Agent with retry logic and persists output to Table Storage.
+    
+    Args:
+        idca_output: IDCA output dictionary
+        naa_output: NAA output object (or None if no invention)
+        naa_assessments: RM assessment results (optional)
+        request_id: Request ID for table storage (optional)
+        table: Azure Table Storage client (optional)
+    
+    Returns:
+        Final report string from the Aggregation Agent
+    """
     prompt = build_prompt(idca_output, naa_output, naa_assessments)
-    final_report = _run_aa(prompt)
-
+    
+    # Define retryable AA execution callable
+    def execute_aa():
+        """
+        Retryable callable for Aggregation Agent execution.
+        Runs the AA and returns its output.
+        """
+        return _run_aa(prompt)
+    
+    # Execute AA with retry logic
+    final_report = retry_agent(execute_aa, "Aggregation Agent")
+    
+    # Persist AA output to Table Storage (if request_id and table provided)
+    if request_id and table:
+        try:
+            entity = table.get_entity("AMIE", request_id)
+            entity["aa_output"] = final_report
+            table.update_entity(entity)
+            print(f"\n[TABLE STORAGE] AA output persisted successfully for request {request_id}")
+        except Exception as e:
+            print(f"\n[TABLE STORAGE] Failed to persist AA output: {e}")
+            import traceback
+            traceback.print_exc()
+    
     print("\n===== AGGREGATION AGENT FINAL REPORT =====\n")
     print(final_report)
     print("\n==========================================\n")
-
+    
     return final_report
 
 

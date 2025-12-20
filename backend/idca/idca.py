@@ -17,7 +17,8 @@ from azure.ai.agents.models import MessageRole
 from PyPDF2 import PdfReader
 import tempfile
 from aa import run_aggregation_agent
-from naa_brain_MVP.naa_test import retry_agent
+from utils.retry import retry_agent
+
 
 
 
@@ -257,7 +258,9 @@ def run_idca(request_id: str):
         try:
             final_report = run_aggregation_agent(
                 idca_output=idca_json,
-                naa_output=None        # no NAA outputs
+                naa_output=None,        # no NAA outputs
+                request_id=request_id,
+                table=table
             )
         except Exception as e:
             print("\n Aggregation Agent failed:", str(e))
@@ -410,7 +413,9 @@ def run_idca(request_id: str):
             final_report = run_aggregation_agent(
                 idca_output=idca_json,
                 naa_output=naa_outputs,
-                naa_assessments=assessments  # <--- PASSING THE SCORES
+                naa_assessments=assessments,  # <--- PASSING THE SCORES
+                request_id=request_id,
+                table=table
             )
         except Exception as e:
             print("\n Aggregation Agent failed:", str(e))
