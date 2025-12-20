@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from azure.ai.agents import AgentsClient
 from azure.ai.agents.models import MessageRole
 from azure.identity import DefaultAzureCredential
-from naa_brain_MVP.search.prior_art_search import progressive_search
+# from naa_brain_MVP.search.prior_art_search import progressive_search  <-- Removed
 
 # ---------------------------------------------------------------------
 # LOAD ENVIRONMENT
@@ -140,6 +140,7 @@ class NAAOutputs:
     ssr: StructuralScoringRubric
     ss_synopsis: str
     ucs: str
+    lor: List[Dict[str, Any]] = field(default_factory=list)  # [NEW] Add LoR field
 
 # ---------------------------------------------------------------------
 # STEP 8 — SOURCE STRUCTURE (SS)
@@ -323,10 +324,22 @@ def build_ucs(ss: SourceStructure) -> str:
     prompt = f"""
 Convert the SS into a Unified Composite Search string (UCS).
 
-Requirements:
-- One line only
-- Use proximity operators / synonym expansion
-- Target Google/Web/Scholar/Patents search
+STRICT REQUIREMENTS (must be followed exactly):
+
+1. Each SS block MUST become a separate semantic constraint.
+2. Constraints MUST be combined using top-level AND operators.
+3. Within each constraint, use OR only for synonyms or equivalent phrases.
+4. Do NOT collapse multiple SS blocks into a single OR chain.
+5. Do NOT use OR at the top level of the query.
+6. Proximity operators (e.g., NEAR/n) may be used ONLY inside a single block.
+7. Parentheses MUST be used so that each block is clearly separable.
+8. Output must be ONE line only.
+
+The resulting UCS MUST have this structure:
+
+(Block 1 synonyms) AND (Block 2 synonyms) AND (Block 3 synonyms) AND ...
+
+This AND-separated block structure is REQUIRED for downstream ablation logic.
 
 SS Blocks:
 {summary}
@@ -379,9 +392,15 @@ def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
     print("\n")
 
     # -------------------- STEP 12 --------------------
-    print("\n [PRIOR ART SEARCH] Executing progressive OpenAlex search...")
+    print("\n [PRIOR ART SEARCH] Executing PARALLEL PROGRESSIVE SEARCH (OpenAlex + Patents + Web)...")
+    
+    # We need to run the async search from this synchronous function
+    import asyncio
+    from naa_brain_MVP.search.search_orchestrator import progressive_search as parallel_progressive_search
+    
     try:
-        final_query, LoR = progressive_search(ucs, target_total=5)
+        # Run async loop
+        final_query, LoR = asyncio.run(parallel_progressive_search(ucs, target_total=5))
 
         print("\n[STEP 12 OUTPUT]")
         print(" PRIOR ART QUERY:", final_query if final_query else "(none)")
@@ -392,14 +411,15 @@ def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
         else:
             print("\n FIRST FIVE REFERENCES:")
             for ref in LoR[:5]:
-                print(f" - {ref['title']} ({ref['year']}) → {ref['url']}")
+                print(f" - [{ref['source']}] {ref['title']} ({ref['year']}) → {ref['url']}")
 
     except Exception as e:
         print("\n[STEP 12 ERROR]")
         print("  Prior-art search failed:")
         print("    ", str(e))
-        print("    (Pipeline continues — UCS or OpenAlex may be malformed or unavailable)")
+        print("    (Pipeline continues — UCS or APIs may be malformed or unavailable)")
+        import traceback
+        traceback.print_exc()
         final_query, LoR = None, []
 
-    return NAAOutputs(ss=ss, ssr=ssr, ss_synopsis=synopsis, ucs=ucs)
-
+    return NAAOutputs(ss=ss, ssr=ssr, ss_synopsis=synopsis, ucs=ucs, lor=LoR)

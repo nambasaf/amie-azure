@@ -259,11 +259,141 @@ def run_idca(request_id: str):
                 print("\n -------- Launching NAA pipeline for request:", request_id)
                 naa_outputs = run_steps_8_to_12(manuscript_text, response)
 
+                # Initialize assessments to None (will be populated if RMs are found and assessed)
+                assessments = None
+
+                # NEW: Retrieve and Store Reference Manuscripts
+                if naa_outputs.lor:
+                    try:
+                        import asyncio
+                        from naa_brain_MVP.rm_retrieval import download_and_store_rms
+                        print("\n -------- Downloading Reference Manuscripts...")
+                        asyncio.run(download_and_store_rms(request_id, naa_outputs.lor, blob_service))
+                    except Exception as e:
+                        print(f"RM Retrieval Failed: {e}")
+
+                    # NEW: Assess RMs if any were downloaded
+                    try:
+                        from naa_brain_MVP.rm_assessment import assess_all_rms
+                        print("\n -------- Assessing Reference Manuscripts against SSR...")
+                        
+                        # SS Synopsis is available in naa_outputs.ss_synopsis
+                        # SSR is in naa_outputs.ssr
+                        
+                        # Need to run async assessment (reusing loop or new run)
+                        assessments = asyncio.run(assess_all_rms(
+                            request_id, 
+                            blob_service, 
+                            naa_outputs.ssr, 
+                            naa_outputs.ss_synopsis
+                        ))
+                        
+                        print("\n===== RM ASSESSMENT RESULTS =====")
+                        for a in assessments:
+                            print(f"\n[Ref] {a.reference_citation}")
+                            print(f"      Synopsis: {a.rs_synopsis}")
+                            print(f"      Novelty Status: {a.status_determination} (EWSS: {a.sos_score['ewss']})")
+                            
+                    except Exception as e:
+                        print(f"RM Assessment Failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                
+                # ========================================
+                # PERSIST NAA OUTPUT TO TABLE STORAGE
+                # ========================================
+                try:
+                    import json
+                    from datetime import datetime
+                    
+                    # Build lor with assessment data merged with original search results
+                    lor_with_scores = []
+                    
+                    if assessments and naa_outputs.lor:
+                        # Create a mapping from filename to assessment
+                        assessment_map = {a.filename: a for a in assessments}
+                        
+                        # Merge original lor metadata with assessment scores
+                        for ref in naa_outputs.lor:
+                            # Try to find matching assessment by checking if any assessment filename contains the ref title
+                            matching_assessment = None
+                            for filename, assessment in assessment_map.items():
+                                # Simple heuristic: check if title appears in filename
+                                if ref.get("title", "").lower()[:20] in filename.lower():
+                                    matching_assessment = assessment
+                                    break
+                            
+                            if matching_assessment:
+                                lor_with_scores.append({
+                                    "reference_citation": matching_assessment.reference_citation,
+                                    "rs_synopsis": matching_assessment.rs_synopsis,
+                                    "sos_score": {
+                                        "css": matching_assessment.sos_score.get("css", 0.0),
+                                        "ewss": matching_assessment.sos_score.get("ewss", 0.0)
+                                    },
+                                    "url": ref.get("url", ""),
+                                    "year": ref.get("year"),
+                                    "source": ref.get("source", "Unknown")
+                                })
+                            else:
+                                # No assessment found, use original lor data only
+                                lor_with_scores.append({
+                                    "reference_citation": ref.get("title", "Unknown"),
+                                    "rs_synopsis": "",
+                                    "sos_score": {"css": 0.0, "ewss": 0.0},
+                                    "url": ref.get("url", ""),
+                                    "year": ref.get("year"),
+                                    "source": ref.get("source", "Unknown")
+                                })
+                    elif naa_outputs.lor:
+                        # No assessments, but we have lor - store search results only
+                        for ref in naa_outputs.lor:
+                            lor_with_scores.append({
+                                "reference_citation": ref.get("title", "Unknown"),
+                                "rs_synopsis": "",
+                                "sos_score": {"css": 0.0, "ewss": 0.0},
+                                "url": ref.get("url", ""),
+                                "year": ref.get("year"),
+                                "source": ref.get("source", "Unknown")
+                            })
+                    
+                    # Build naa_output JSON structure
+                    naa_output_json = {
+                        "ss_synopsis": naa_outputs.ss_synopsis,
+                        "source_structure": [block.block_name for block in naa_outputs.ss.blocks] if hasattr(naa_outputs.ss, 'blocks') else [],
+                        "ssr": {
+                            "items": [
+                                {
+                                    "block_name": item.block_name,
+                                    "weight": item.weight,
+                                    "match_criteria": item.match_criteria
+                                }
+                                for item in naa_outputs.ssr.items
+                            ]
+                        } if naa_outputs.ssr else {},
+                        "ucs": naa_outputs.ucs,
+                        "lor": lor_with_scores,
+                        "naa_timestamp": datetime.utcnow().isoformat() + "Z"
+                    }
+                    
+                    # Store in table
+                    entity = table.get_entity("AMIE", request_id)
+                    entity["naa_output"] = json.dumps(naa_output_json)
+                    table.update_entity(entity)
+                    
+                    print(f"\n[TABLE STORAGE] NAA output persisted successfully ({len(lor_with_scores)} references)")
+                    
+                except Exception as e:
+                    print(f"\n[TABLE STORAGE] Failed to persist NAA output: {e}")
+                    import traceback
+                    traceback.print_exc()
+                
                 print("\n -------- Running Aggregation Agent...\n")
                 try:
                     final_report = run_aggregation_agent(
                         idca_output=idca_json,
-                        naa_output=naa_outputs
+                        naa_output=naa_outputs,
+                        naa_assessments=assessments  # <--- PASSING THE SCORES
                     )
                 except Exception as e:
                     print("\n Aggregation Agent failed:", str(e))
@@ -280,7 +410,11 @@ def run_idca(request_id: str):
 # ------------------- CLI -------------------
 if __name__ == "__main__":
     
-    run_idca("1d235a2f-f03c-4f71-ae92-a5f61de38d29")
+    # run_idca("1d235a2f-f03c-4f71-ae92-a5f61de38d29")
 
     # with No invention detected 
     # run_idca("aa9a21b4-3a60-4e45-b0b5-684318ac985e")
+    # print("\n")
+    # print("SECOND RUNNNNN -----------------------------------")
+    # another real STEM manuscript 
+    run_idca("d7e98b6f-17fc-421f-afa9-5e4510e34395")
