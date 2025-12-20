@@ -105,6 +105,34 @@ def _chat(agent_id: str, prompt: str) -> str:
     raise RuntimeError(f"No assistant output returned for agent {agent_id}.")
 
 # ---------------------------------------------------------------------
+# RETRY WRAPPER
+# ---------------------------------------------------------------------
+def retry_agent(callable_fn, agent_name: str):
+    """
+    Retry wrapper for NAA agents (Steps 8-11).
+    
+    Executes the callable inside a while True loop.
+    Catches all exceptions and retries until success.
+    Logs each failure and retry attempt.
+    
+    Args:
+        callable_fn: A callable (lambda or function) that executes the agent
+        agent_name: Human-readable name for logging (e.g., "SS Agent")
+    
+    Returns:
+        The result of callable_fn on first successful execution
+    """
+    while True:
+        try:
+            result = callable_fn()
+            return result
+        except Exception as e:
+            print(f"\n[RETRY] {agent_name} failed:")
+            print(f"  {str(e)}")
+            print(f"Retrying {agent_name}...\n")
+            # Loop continues, callable will be re-executed
+
+# ---------------------------------------------------------------------
 # DATA MODELS
 # ---------------------------------------------------------------------
 @dataclass
@@ -357,8 +385,12 @@ Return ONLY the UCS string.
 def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
     print("Starting NAA workflow...\n")
 
+    # -------------------- STEP 8 --------------------
     print("\n===== SOURCE STRUCTURE (SS) =====")
-    ss = build_source_structure(manuscript_text, idca_output)
+    ss = retry_agent(
+        lambda: build_source_structure(manuscript_text, idca_output),
+        "SS Agent"
+    )
     print(" [SS AGENT OUTPUT]")
     for blk in ss.blocks:
         print("  ", blk)
@@ -366,7 +398,10 @@ def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
 
     # -------------------- STEP 9 --------------------
     print("\n [SSR AGENT] Building Structural Scoring Rubric...")
-    ssr = build_ssr(ss)
+    ssr = retry_agent(
+        lambda: build_ssr(ss),
+        "SSR Agent"
+    )
     print("[SSR AGENT OUTPUT]")
     for item in ssr.items:
         print("  ", item)
@@ -379,14 +414,20 @@ def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
 
     # -------------------- STEP 10 --------------------
     print("\n[SS SYNOPSIS AGENT] Creating Source Structure Synopsis...")
-    synopsis = ss_synopsis(ss)
+    synopsis = retry_agent(
+        lambda: ss_synopsis(ss),
+        "SS Synopsis Agent"
+    )
     print(" [SS SYNOPSIS OUTPUT]")
     print("  ", synopsis)
     print("\n")
 
     # -------------------- STEP 11 --------------------
     print("\n [UCS AGENT] Generating Unified Composite Search String...")
-    ucs = build_ucs(ss)
+    ucs = retry_agent(
+        lambda: build_ucs(ss),
+        "UCS Agent"
+    )
     print("[UCS OUTPUT]")
     print("  ", ucs)
     print("\n")
