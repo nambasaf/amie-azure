@@ -430,11 +430,11 @@ def run_idca(request_id: str):
 # ------------------- CLI -------------------
 if __name__ == "__main__":
     
-    # run_idca("1d235a2f-f03c-4f71-ae92-a5f61de38d29")
+    run_idca("1d235a2f-f03c-4f71-ae92-a5f61de38d29")
 
     # with No invention detected 
     # run_idca("aa9a21b4-3a60-4e45-b0b5-684318ac985e")
     # print("\n")
     # print("SECOND RUNNNNN -----------------------------------")
     # another real STEM manuscript 
-    run_idca("d7e98b6f-17fc-421f-afa9-5e4510e34395")
+    # run_idca("d7e98b6f-17fc-421f-afa9-5e4510e34395")

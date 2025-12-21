@@ -56,7 +56,16 @@ async def download_pdf(url: str) -> bytes:
         resp.raise_for_status()
         
         content = resp.content
-        
+
+        # Must start with %PDF
+        if not content.startswith(b"%PDF"):
+            raise ValueError("Invalid PDF header (missing %PDF)")
+
+        # Must end with %%EOF (allow trailing whitespace)
+        if b"%%EOF" not in content[-1024:]:
+            raise ValueError("Incomplete PDF (missing EOF marker)")
+
+
         # 3. Validate
         # Content-Type check (permissive)
         ctype = resp.headers.get("Content-Type", "").lower()
