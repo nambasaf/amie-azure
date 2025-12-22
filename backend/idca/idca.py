@@ -17,6 +17,8 @@ from azure.ai.agents.models import MessageRole
 from PyPDF2 import PdfReader
 import tempfile
 from aa import run_aggregation_agent
+from utils.retry import retry_agent
+
 
 
 
@@ -182,98 +184,246 @@ def run_idca(request_id: str):
     manuscript = get_manuscript_text(request_id)
     print("\n--- MANUSCRIPT SIZE:", len(manuscript), "characters ---\n")
 
-    # Create a conversation thread
-    thread = agents_client.threads.create()
+    # Define the retryable IDCA agent execution
+    def execute_idca_agent():
+        """
+        Retryable callable for IDCA agent execution.
+        Creates thread, sends prompt and manuscript, runs agent, validates JSON.
+        Returns parsed JSON object.
+        """
+        # Create a conversation thread
+        thread = agents_client.threads.create()
 
-     # Send IDCA instructions
-    agents_client.messages.create(
-        thread_id=thread.id,
-        role=MessageRole.USER,
-        content=IDCA_PROMPT
-    )
+        # Send IDCA instructions
+        agents_client.messages.create(
+            thread_id=thread.id,
+            role=MessageRole.USER,
+            content=IDCA_PROMPT
+        )
 
-    send_in_chunks(thread.id, manuscript)
-    msgs = list(agents_client.messages.list(thread_id=thread.id))
-    print(f"Messages stored in thread: {len(msgs)}")
-    print(f"First chunk:\n{msgs[0].text_messages[0].text.value[:300]}")
+        send_in_chunks(thread.id, manuscript)
+        msgs = list(agents_client.messages.list(thread_id=thread.id))
+        print(f"Messages stored in thread: {len(msgs)}")
+        print(f"First chunk:\n{msgs[0].text_messages[0].text.value[:300]}")
 
-    print("\n Running IDCA...\n")
+        print("\n Running IDCA...\n")
 
-    # Start run
-    run = agents_client.runs.create_and_process(
-    thread_id=thread.id,
-    agent_id=IDCA_AGENT_ID
-    )
+        # Start run
+        run = agents_client.runs.create_and_process(
+            thread_id=thread.id,
+            agent_id=IDCA_AGENT_ID
+        )
 
-     # Retrieve messages after run completes
-    message_list = list(agents_client.messages.list(thread_id=thread.id))
+        # Retrieve messages after run completes
+        message_list = list(agents_client.messages.list(thread_id=thread.id))
 
-    for m in reversed(message_list):
-        if m.role == "assistant" and m.text_messages:
-            response = m.text_messages[-1].text.value
-            
-            # Validate JSON
-            import json
-            try:
-                idca_json = json.loads(response)
-            except:
-                raise RuntimeError("Invalid JSON in IDCA output")
-
-            # Save IDCA output to table
-            entity = table.get_entity("AMIE", request_id)
-            entity["idca_output"] = response
-            entity["status"] = "classified"
-            table.update_entity(entity)
-
-            print("\nIDCA Output:\n")
-            print(response)
-
-            # -------------------------------
-            # CASE 1: NO INVENTION
-            # --> Skip NAA completely
-            # --> Only run Aggregation Agent
-            # -------------------------------
-            if idca_json.get("status_determination") != "Present":
-                print("\n -------- No invention detected — skipping NAA.")
-                print(" -------- Running Aggregation Agent directly...\n")
-
+        for m in reversed(message_list):
+            if m.role == "assistant" and m.text_messages:
+                response = m.text_messages[-1].text.value
+                
+                # Validate JSON
+                import json
                 try:
-                    final_report = run_aggregation_agent(
-                        idca_output=idca_json,
-                        naa_output=None        # no NAA outputs
-                    )
-                except Exception as e:
-                    print("\n Aggregation Agent failed:", str(e))
+                    idca_json = json.loads(response)
+                except:
+                    raise RuntimeError("Invalid JSON in IDCA output")
 
-                return response
+                return {"response": response, "idca_json": idca_json}
 
-            # -------------------------------
-            # CASE 2: INVENTION PRESENT
-            # --> Run NAA first
-            # --> Then run Aggregation Agent
-            # -------------------------------
+        raise RuntimeError("No assistant response returned.")
+
+    # Execute IDCA agent with retry logic
+    result = retry_agent(execute_idca_agent, "IDCA Agent")
+    response = result["response"]
+    idca_json = result["idca_json"]
+
+    # Save IDCA output to table
+    entity = table.get_entity("AMIE", request_id)
+    entity["idca_output"] = response
+    entity["status"] = "classified"
+    table.update_entity(entity)
+
+    print("\nIDCA Output:\n")
+    print(response)
+
+    # -------------------------------
+    # CASE 1: NO INVENTION
+    # --> Skip NAA completely
+    # --> Only run Aggregation Agent
+    # -------------------------------
+    if idca_json.get("status_determination") != "Present":
+        print("\n -------- No invention detected — skipping NAA.")
+        print(" -------- Running Aggregation Agent directly...\n")
+
+        try:
+            final_report = run_aggregation_agent(
+                idca_output=idca_json,
+                naa_output=None,        # no NAA outputs
+                request_id=request_id,
+                table=table
+            )
+        except Exception as e:
+            print("\n Aggregation Agent failed:", str(e))
+
+        return response
+
+    # -------------------------------
+    # CASE 2: INVENTION PRESENT
+    # --> Run NAA first
+    # --> Then run Aggregation Agent
+    # -------------------------------
+    try:
+        from naa_brain_MVP.naa_test import run_steps_8_to_12
+        manuscript_text = get_manuscript_text(request_id)
+
+        print("\n -------- Launching NAA pipeline for request:", request_id)
+        naa_outputs = run_steps_8_to_12(manuscript_text, response)
+
+        # Initialize assessments to None (will be populated if RMs are found and assessed)
+        assessments = None
+
+        # NEW: Retrieve and Store Reference Manuscripts
+        if naa_outputs.lor:
             try:
-                from naa_brain_MVP.naa_test import run_steps_8_to_12
-                manuscript_text = get_manuscript_text(request_id)
-
-                print("\n -------- Launching NAA pipeline for request:", request_id)
-                naa_outputs = run_steps_8_to_12(manuscript_text, response)
-
-                print("\n -------- Running Aggregation Agent...\n")
-                try:
-                    final_report = run_aggregation_agent(
-                        idca_output=idca_json,
-                        naa_output=naa_outputs
-                    )
-                except Exception as e:
-                    print("\n Aggregation Agent failed:", str(e))
-
+                import asyncio
+                from naa_brain_MVP.rm_retrieval import download_and_store_rms
+                print("\n -------- Downloading Reference Manuscripts...")
+                asyncio.run(download_and_store_rms(request_id, naa_outputs.lor, blob_service))
             except Exception as e:
-                print("\n NAA failed:", str(e))
+                print(f"RM Retrieval Failed: {e}")
 
-            return response
+            # NEW: Assess RMs if any were downloaded
+            try:
+                from naa_brain_MVP.rm_assessment import assess_all_rms
+                print("\n -------- Assessing Reference Manuscripts against SSR...")
+                
+                # SS Synopsis is available in naa_outputs.ss_synopsis
+                # SSR is in naa_outputs.ssr
+                
+                # Need to run async assessment (reusing loop or new run)
+                assessments = asyncio.run(assess_all_rms(
+                    request_id, 
+                    blob_service, 
+                    naa_outputs.ssr, 
+                    naa_outputs.ss_synopsis
+                ))
+                
+                print("\n===== RM ASSESSMENT RESULTS =====")
+                for a in assessments:
+                    print(f"\n[Ref] {a.reference_citation}")
+                    print(f"      Synopsis: {a.rs_synopsis}")
+                    print(f"      Novelty Status: {a.status_determination} (EWSS: {a.sos_score['ewss']})")
+                    
+            except Exception as e:
+                print(f"RM Assessment Failed: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # ========================================
+        # PERSIST NAA OUTPUT TO TABLE STORAGE
+        # ========================================
+        try:
+            import json
+            from datetime import datetime
+            
+            # Build lor with assessment data merged with original search results
+            lor_with_scores = []
+            
+            if assessments and naa_outputs.lor:
+                # Create a mapping from filename to assessment
+                assessment_map = {a.filename: a for a in assessments}
+                
+                # Merge original lor metadata with assessment scores
+                for ref in naa_outputs.lor:
+                    # Try to find matching assessment by checking if any assessment filename contains the ref title
+                    matching_assessment = None
+                    for filename, assessment in assessment_map.items():
+                        # Simple heuristic: check if title appears in filename
+                        if ref.get("title", "").lower()[:20] in filename.lower():
+                            matching_assessment = assessment
+                            break
+                    
+                    if matching_assessment:
+                        lor_with_scores.append({
+                            "reference_citation": matching_assessment.reference_citation,
+                            "rs_synopsis": matching_assessment.rs_synopsis,
+                            "sos_score": {
+                                "css": matching_assessment.sos_score.get("css", 0.0),
+                                "ewss": matching_assessment.sos_score.get("ewss", 0.0)
+                            },
+                            "url": ref.get("url", ""),
+                            "year": ref.get("year"),
+                            "source": ref.get("source", "Unknown")
+                        })
+                    else:
+                        # No assessment found, use original lor data only
+                        lor_with_scores.append({
+                            "reference_citation": ref.get("title", "Unknown"),
+                            "rs_synopsis": "",
+                            "sos_score": {"css": 0.0, "ewss": 0.0},
+                            "url": ref.get("url", ""),
+                            "year": ref.get("year"),
+                            "source": ref.get("source", "Unknown")
+                        })
+            elif naa_outputs.lor:
+                # No assessments, but we have lor - store search results only
+                for ref in naa_outputs.lor:
+                    lor_with_scores.append({
+                        "reference_citation": ref.get("title", "Unknown"),
+                        "rs_synopsis": "",
+                        "sos_score": {"css": 0.0, "ewss": 0.0},
+                        "url": ref.get("url", ""),
+                        "year": ref.get("year"),
+                        "source": ref.get("source", "Unknown")
+                    })
+            
+            # Build naa_output JSON structure
+            naa_output_json = {
+                "ss_synopsis": naa_outputs.ss_synopsis,
+                "source_structure": [block.block_name for block in naa_outputs.ss.blocks] if hasattr(naa_outputs.ss, 'blocks') else [],
+                "ssr": {
+                    "items": [
+                        {
+                            "block_name": item.block_name,
+                            "weight": item.weight,
+                            "match_criteria": item.match_criteria
+                        }
+                        for item in naa_outputs.ssr.items
+                    ]
+                } if naa_outputs.ssr else {},
+                "ucs": naa_outputs.ucs,
+                "lor": lor_with_scores,
+                "naa_timestamp": datetime.utcnow().isoformat() + "Z"
+            }
+            
+            # Store in table
+            entity = table.get_entity("AMIE", request_id)
+            entity["naa_output"] = json.dumps(naa_output_json)
+            table.update_entity(entity)
+            
+            print(f"\n[TABLE STORAGE] NAA output persisted successfully ({len(lor_with_scores)} references)")
+            
+        except Exception as e:
+            print(f"\n[TABLE STORAGE] Failed to persist NAA output: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print("\n -------- Running Aggregation Agent...\n")
+        try:
+            final_report = run_aggregation_agent(
+                idca_output=idca_json,
+                naa_output=naa_outputs,
+                naa_assessments=assessments,  # <--- PASSING THE SCORES
+                request_id=request_id,
+                table=table
+            )
+        except Exception as e:
+            print("\n Aggregation Agent failed:", str(e))
 
-    raise RuntimeError("No assistant response returned.")
+    except Exception as e:
+        print("\n NAA failed:", str(e))
+
+    return response
 
 
 
@@ -284,3 +434,7 @@ if __name__ == "__main__":
 
     # with No invention detected 
     # run_idca("aa9a21b4-3a60-4e45-b0b5-684318ac985e")
+    # print("\n")
+    # print("SECOND RUNNNNN -----------------------------------")
+    # another real STEM manuscript 
+    # run_idca("d7e98b6f-17fc-421f-afa9-5e4510e34395")
