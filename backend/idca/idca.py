@@ -18,7 +18,7 @@ from azure.data.tables import TableServiceClient
 from azure.ai.agents.models import MessageRole
 from PyPDF2 import PdfReader
 import tempfile
-from backend.aa import run_aggregation_agent
+from backend.aa.aa import run_aggregation_agent
 from backend.utils.retry import retry_agent
 
 
