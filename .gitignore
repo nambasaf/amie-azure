@@ -4,6 +4,10 @@ __pycache__/
 *$py.class
 
 
+
+.env
+**/.env
+
 # OS-specific junk
 .DS_Store
 Thumbs.db
