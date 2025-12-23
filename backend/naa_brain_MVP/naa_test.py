@@ -49,6 +49,7 @@ agents_client = AgentsClient(
     ),
 )
 
+
 # ---------------------------------------------------------------------
 # CHAT WRAPPER – SIMPLE & SAFE
 # ---------------------------------------------------------------------
@@ -67,7 +68,7 @@ def _chat(agent_id: str, prompt: str) -> str:
     # 2. Send user message
     agents_client.messages.create(
         thread_id=thread.id,
-        role=MessageRole.USER,   # only user/assistant are allowed
+        role=MessageRole.USER,  # only user/assistant are allowed
         content=prompt,
     )
 
@@ -84,10 +85,9 @@ def _chat(agent_id: str, prompt: str) -> str:
             text = msg.text_messages[-1].text.value.strip()
             if not text:
                 raise RuntimeError(f"Agent {agent_id} returned an empty response.")
-            
-            
+
             # Strip markdown code fences if they appear
-            
+
             if text.startswith("```"):
                 # Remove leading/trailing ```
                 text = text.strip("`").strip()
@@ -95,7 +95,7 @@ def _chat(agent_id: str, prompt: str) -> str:
                 # Remove language identifier if present (json, yaml, etc.)
                 for lang in ("json", "yaml", "js", "python"):
                     if text.lower().startswith(lang):
-                        text = text[len(lang):].strip()
+                        text = text[len(lang) :].strip()
 
             # Final sanity: ensure clean JSON starts correctly if JSON expected
             text = text.strip()
@@ -104,7 +104,9 @@ def _chat(agent_id: str, prompt: str) -> str:
 
     raise RuntimeError(f"No assistant output returned for agent {agent_id}.")
 
-from utils.retry import retry_agent
+
+from backend.utils.retry import retry_agent
+
 
 # ---------------------------------------------------------------------
 # DATA MODELS
@@ -143,6 +145,7 @@ class NAAOutputs:
     ss_synopsis: str
     ucs: str
     lor: List[Dict[str, Any]] = field(default_factory=list)  # [NEW] Add LoR field
+
 
 # ---------------------------------------------------------------------
 # STEP 8 — SOURCE STRUCTURE (SS)
@@ -189,7 +192,9 @@ IDCA Output:
         ) from e
 
     if "source_structure" not in data:
-        raise RuntimeError(f"JSON from SS agent missing 'source_structure' key. Got:\n{data}")
+        raise RuntimeError(
+            f"JSON from SS agent missing 'source_structure' key. Got:\n{data}"
+        )
 
     blocks = []
     for b in data["source_structure"]:
@@ -204,6 +209,7 @@ IDCA Output:
         )
 
     return SourceStructure(blocks=blocks)
+
 
 # ---------------------------------------------------------------------
 # STEP 9 — STRUCTURAL SCORING RUBRIC (SSR)
@@ -292,7 +298,6 @@ def render_ssr_table(ssr: StructuralScoringRubric) -> str:
     return header + divider + rows
 
 
-
 # ---------------------------------------------------------------------
 # STEP 10 — SS SYNOPSIS (ONE SENTENCE)
 # ---------------------------------------------------------------------
@@ -316,6 +321,7 @@ Return ONLY the sentence.
 
     out = _chat(SS_SYNOPSIS_AGENT_ID, prompt)
     return out.strip()
+
 
 # ---------------------------------------------------------------------
 # STEP 11 — UNIFIED COMPOSITE SEARCH STRING (UCS)
@@ -353,6 +359,7 @@ Return ONLY the UCS string.
     # normalize whitespace
     return " ".join(ucs.split())
 
+
 # ---------------------------------------------------------------------
 # PIPELINE ORCHESTRATOR (8–11)
 # ---------------------------------------------------------------------
@@ -362,8 +369,7 @@ def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
     # -------------------- STEP 8 --------------------
     print("\n===== SOURCE STRUCTURE (SS) =====")
     ss = retry_agent(
-        lambda: build_source_structure(manuscript_text, idca_output),
-        "SS Agent"
+        lambda: build_source_structure(manuscript_text, idca_output), "SS Agent"
     )
     print(" [SS AGENT OUTPUT]")
     for blk in ss.blocks:
@@ -372,10 +378,7 @@ def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
 
     # -------------------- STEP 9 --------------------
     print("\n [SSR AGENT] Building Structural Scoring Rubric...")
-    ssr = retry_agent(
-        lambda: build_ssr(ss),
-        "SSR Agent"
-    )
+    ssr = retry_agent(lambda: build_ssr(ss), "SSR Agent")
     print("[SSR AGENT OUTPUT]")
     for item in ssr.items:
         print("  ", item)
@@ -385,34 +388,31 @@ def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
     print(render_ssr_table(ssr))
     print("\n")
 
-
     # -------------------- STEP 10 --------------------
     print("\n[SS SYNOPSIS AGENT] Creating Source Structure Synopsis...")
-    synopsis = retry_agent(
-        lambda: ss_synopsis(ss),
-        "SS Synopsis Agent"
-    )
+    synopsis = retry_agent(lambda: ss_synopsis(ss), "SS Synopsis Agent")
     print(" [SS SYNOPSIS OUTPUT]")
     print("  ", synopsis)
     print("\n")
 
     # -------------------- STEP 11 --------------------
     print("\n [UCS AGENT] Generating Unified Composite Search String...")
-    ucs = retry_agent(
-        lambda: build_ucs(ss),
-        "UCS Agent"
-    )
+    ucs = retry_agent(lambda: build_ucs(ss), "UCS Agent")
     print("[UCS OUTPUT]")
     print("  ", ucs)
     print("\n")
 
     # -------------------- STEP 12 --------------------
-    print("\n [PRIOR ART SEARCH] Executing PARALLEL PROGRESSIVE SEARCH (OpenAlex + Patents + Web)...")
-    
+    print(
+        "\n [PRIOR ART SEARCH] Executing PARALLEL PROGRESSIVE SEARCH (OpenAlex + Patents + Web)..."
+    )
+
     # We need to run the async search from this synchronous function
     import asyncio
-    from naa_brain_MVP.search.search_orchestrator import progressive_search as parallel_progressive_search
-    
+    from naa_brain_MVP.search.search_orchestrator import (
+        progressive_search as parallel_progressive_search,
+    )
+
     try:
         # Run async loop
         final_query, LoR = asyncio.run(parallel_progressive_search(ucs, target_total=5))
@@ -426,7 +426,9 @@ def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
         else:
             print("\n FIRST FIVE REFERENCES:")
             for ref in LoR[:5]:
-                print(f" - [{ref['source']}] {ref['title']} ({ref['year']}) → {ref['url']}")
+                print(
+                    f" - [{ref['source']}] {ref['title']} ({ref['year']}) → {ref['url']}"
+                )
 
     except Exception as e:
         print("\n[STEP 12 ERROR]")
@@ -434,6 +436,7 @@ def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
         print("    ", str(e))
         print("    (Pipeline continues — UCS or APIs may be malformed or unavailable)")
         import traceback
+
         traceback.print_exc()
         final_query, LoR = None, []
 

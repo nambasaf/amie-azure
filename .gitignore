@@ -15,8 +15,13 @@ dist/
 # Log files
 *.log
 
-# Temporary environment files
+# Environment files (sensitive - contains API keys and secrets)
+.env
 .env.*
+.env.local
+.env.deployment
+.env.production
+.env.development
 
 # C extensions
 *.so

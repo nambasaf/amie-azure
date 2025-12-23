@@ -7,32 +7,41 @@ from typing import List, Dict, Any
 from dataclasses import dataclass, field
 from PyPDF2 import PdfReader
 from azure.storage.blob import BlobServiceClient
-from naa_brain_MVP.rm_retrieval import get_container_name
-from naa_brain_MVP.naa_test import _chat, SSR_AGENT_ID, render_ssr_table, StructuralScoringRubric, SSRItem
+from backend.naa_brain_MVP.rm_retrieval import get_container_name
+from backend.naa_brain_MVP.naa_test import (
+    _chat,
+    SSR_AGENT_ID,
+    render_ssr_table,
+    StructuralScoringRubric,
+    SSRItem,
+)
 
 # ---------------------------------------------------------------------
 # DATA MODELS
 # ---------------------------------------------------------------------
+
 
 @dataclass
 class RMAssessmentOutput:
     filename: str
     reference_citation: str
     rs_synopsis: str
-    sos_score: Dict[str, Any] # Contains CSS, EWSS, and itemized scores
-    status_determination: str # "Novel", "Not Novel", etc - derived from comparison
+    sos_score: Dict[str, Any]  # Contains CSS, EWSS, and itemized scores
+    status_determination: str  # "Novel", "Not Novel", etc - derived from comparison
+
 
 # ---------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------
 
+
 def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
     """Extracts text from PDF or TXT files."""
     try:
         # Check file extension
-        if filename.endswith('.txt'):
+        if filename.endswith(".txt"):
             # Decode text file
-            return file_bytes.decode('utf-8')
+            return file_bytes.decode("utf-8")
         else:
             # Assume PDF
             with io.BytesIO(file_bytes) as f:
@@ -45,22 +54,23 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
         logging.error(f"Failed to extract text from {filename}: {e}")
         return ""
 
+
 def format_patent_citation(patent_data: dict) -> str:
     """
     Formats a patent citation in APA style.
-    
+
     Format: Inventor(s). (Year). Title. U.S. Patent No. XXXXXXX. USPTO.
-    
+
     Example:
-    Smith, J., & Doe, A. (2023). Quantum computing apparatus. 
+    Smith, J., & Doe, A. (2023). Quantum computing apparatus.
     U.S. Patent No. 11,234,567. USPTO.
     """
     # Extract data
-    inventors = patent_data.get('inventors', [])
-    year = patent_data.get('year', 'n.d.')
-    title = patent_data.get('title', 'Untitled Patent')
-    patent_number = patent_data.get('patent_number', 'Unknown')
-    
+    inventors = patent_data.get("inventors", [])
+    year = patent_data.get("year", "n.d.")
+    title = patent_data.get("title", "Untitled Patent")
+    patent_number = patent_data.get("patent_number", "Unknown")
+
     # Format inventors
     if inventors:
         if len(inventors) == 1:
@@ -71,19 +81,22 @@ def format_patent_citation(patent_data: dict) -> str:
             inventor_str = f"{inventors[0]}, et al."
     else:
         inventor_str = "Unknown Inventor"
-    
+
     # Build citation
-    citation = f"{inventor_str}. ({year}). {title}. U.S. Patent No. {patent_number}. USPTO."
-    
+    citation = (
+        f"{inventor_str}. ({year}). {title}. U.S. Patent No. {patent_number}. USPTO."
+    )
+
     return citation
+
 
 def generate_assessment_prompt(rm_text: str, ssr_json: str, ss_summary: str) -> str:
     """Generates the prompt for the LLM to assess the RM."""
-    
+
     # Truncate RM text to fit context if needed (approx 15k chars is usually safe for summary)
-    # But for deep structural matching we want as much as possible. 
+    # But for deep structural matching we want as much as possible.
     # Let's truncate to 30,000 characters to be safe with GPT-4 context limits if needed.
-    truncated_text = rm_text[:30000] 
+    truncated_text = rm_text[:30000]
 
     return f"""
 You are the Novelty Assessment Agent. Your task is to Assess a Reference Manuscript (RM) against a Source Structure (SS) using a Structural Scoring Rubric (SSR).
@@ -149,11 +162,18 @@ Note:
 - "Requires Expert Review" otherwise.
 """
 
+
 # ---------------------------------------------------------------------
 # MAIN ASSESSMENT FUNCTION
 # ---------------------------------------------------------------------
 
-async def assess_all_rms(req_id: str, blob_service_client: BlobServiceClient, ssr: StructuralScoringRubric, ss_summary: str) -> List[RMAssessmentOutput]:
+
+async def assess_all_rms(
+    req_id: str,
+    blob_service_client: BlobServiceClient,
+    ssr: StructuralScoringRubric,
+    ss_summary: str,
+) -> List[RMAssessmentOutput]:
     """
     1. List all blobs in {reqID}_RMs
     2. For each file (PDF or TXT):
@@ -164,18 +184,24 @@ async def assess_all_rms(req_id: str, blob_service_client: BlobServiceClient, ss
     """
     container_name = get_container_name(req_id)
     container_client = blob_service_client.get_container_client(container_name)
-    
+
     if not container_client.exists():
         logging.warning(f"Container {container_name} not found. Skipping assessment.")
         return []
 
     assessments = []
-    
+
     # Convert SSR to JSON string for prompt
-    ssr_dict = {"items": [
-        {"block_name": i.block_name, "weight": i.weight, "match_criteria": i.match_criteria} 
-        for i in ssr.items
-    ]}
+    ssr_dict = {
+        "items": [
+            {
+                "block_name": i.block_name,
+                "weight": i.weight,
+                "match_criteria": i.match_criteria,
+            }
+            for i in ssr.items
+        ]
+    }
     ssr_json = json.dumps(ssr_dict, indent=2)
 
     # Sync client list_blobs is not async
@@ -186,29 +212,31 @@ async def assess_all_rms(req_id: str, blob_service_client: BlobServiceClient, ss
         # Accept both .pdf and .txt files
         if not (blob_name.endswith(".pdf") or blob_name.endswith(".txt")):
             continue
-            
+
         logging.info(f"\n[RM-ASSESSMENT] Processing: {blob_name}")
-        
+
         try:
             # 1. Download (Sync)
             blob_client = container_client.get_blob_client(blob_name)
             content = blob_client.download_blob().readall()
-            
+
             # 2. Extract Text (handles both PDF and TXT)
             text = extract_text_from_file(content, blob_name)
             if len(text) < 500:
-                logging.warning(f"Text too short ({len(text)} chars). Skipping LLM assessment.")
+                logging.warning(
+                    f"Text too short ({len(text)} chars). Skipping LLM assessment."
+                )
                 continue
-                
+
             # 3. Assess (Synchronous call to _chat inside async loop - blocked but ok for MVP)
             prompt = generate_assessment_prompt(text, ssr_json, ss_summary)
-            
+
             response_json_str = _chat(SSR_AGENT_ID, prompt)
-            
+
             # 4. Parse
             try:
                 data = json.loads(response_json_str)
-                
+
                 # Create Output Object
                 assessment = RMAssessmentOutput(
                     filename=blob_name,
@@ -217,14 +245,16 @@ async def assess_all_rms(req_id: str, blob_service_client: BlobServiceClient, ss
                     sos_score={
                         "css": data.get("css", 0.0),
                         "ewss": data.get("ewss", 0.0),
-                        "details": data.get("ss_match_scores", [])
+                        "details": data.get("ss_match_scores", []),
                     },
-                    status_determination=data.get("novelty_status", "Unknown")
+                    status_determination=data.get("novelty_status", "Unknown"),
                 )
                 assessments.append(assessment)
-                
-                print(f"  -> Analyzed. Status: {assessment.status_determination} (EWSS: {assessment.sos_score['ewss']})")
-                
+
+                print(
+                    f"  -> Analyzed. Status: {assessment.status_determination} (EWSS: {assessment.sos_score['ewss']})"
+                )
+
             except json.JSONDecodeError:
                 logging.error(f"Failed to parse JSON response for {blob_name}")
                 logging.debug(f"Raw response: {response_json_str}")

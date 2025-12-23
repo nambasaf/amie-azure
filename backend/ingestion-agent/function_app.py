@@ -2,6 +2,7 @@ import azure.functions as func
 from azure.storage.blob import BlobServiceClient
 from azure.data.tables import TableServiceClient, TableEntity
 import logging
+from azure.storage.queue import QueueClient
 import os
 import uuid
 import datetime
@@ -11,16 +12,18 @@ from PyPDF2 import PdfReader
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
-# Retrieve connection string from Azure configuration
-AZURE_STORAGE_CONNECTION_STRING = os.getenv("AzureWebJobsStorage")
+# Retrieve connection string (prefer explicit var, fallback to default)
+AZURE_STORAGE_CONNECTION_STRING = os.getenv(
+    "AZURE_STORAGE_CONNECTION_STRING"
+) or os.getenv("AzureWebJobsStorage")
 CONTAINER_NAME = "manuscript-uploads"
 TABLE_NAME = "IngestionRequests"
 
 # Initialize Clients
-blob_service = BlobServiceClient.from_connection_string(
-    AZURE_STORAGE_CONNECTION_STRING)
+blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
 table_service = TableServiceClient.from_connection_string(
-    AZURE_STORAGE_CONNECTION_STRING)
+    AZURE_STORAGE_CONNECTION_STRING
+)
 container_client = blob_service.get_container_client(CONTAINER_NAME)
 
 # verifying container exists
@@ -35,7 +38,7 @@ except Exception:
     pass
 
 
-@app.route(route="upload", methods=["POST"]) 
+@app.route(route="upload", methods=["POST"])
 def upload(req: func.HttpRequest) -> func.HttpResponse:
     """
     Receives a file upload from the frontend, saves it to Azure Blob Storage,
@@ -54,8 +57,7 @@ def upload(req: func.HttpRequest) -> func.HttpResponse:
         # Upload the file to Blob
         blob_client = container_client.get_blob_client(uploaded_file.filename)
         blob_client.upload_blob(uploaded_file.stream.read(), overwrite=True)
-        logging.info(
-            f"File '{uploaded_file.filename}' uploaded to blob storage.")
+        logging.info(f"File '{uploaded_file.filename}' uploaded to blob storage.")
 
         # Build ingestion record
         entity = {
@@ -63,26 +65,43 @@ def upload(req: func.HttpRequest) -> func.HttpResponse:
             "RowKey": request_id,
             "filename": uploaded_file.filename,
             "status": "uploaded",
-            "uploaded_at": datetime.datetime.utcnow().isoformat()
+            "uploaded_at": datetime.datetime.utcnow().isoformat(),
         }
 
         # Insert into Table Storage
         table_client = table_service.get_table_client(TABLE_NAME)
         table_client.create_entity(entity=entity)
 
+        # ----------------------------------------------------
+        # Automatically trigger IDCA HTTP Function
+        # ----------------------------------------------------
+        try:
+            import httpx, os
+
+            IDCA_BASE = os.getenv("IDCA_BASE", "http://localhost:7072/api")
+            httpx.post(f"{IDCA_BASE}/idca/run/{request_id}", timeout=5.0)
+            # Optimistically mark as in progress so UI shows spinner immediately
+            entity["status"] = "classifying"
+            table_client.update_entity(mode="merge", entity=entity)
+        except Exception as trigger_err:
+            logging.warning(f"Could not trigger IDCA automatically: {trigger_err}")
+
         return func.HttpResponse(
-            json.dumps({
-                "request_id": request_id,
-                "message": "Upload successful!",
-                "filename": uploaded_file.filename
-            }),
+            json.dumps(
+                {
+                    "request_id": request_id,
+                    "message": "Upload successful!",
+                    "filename": uploaded_file.filename,
+                }
+            ),
             mimetype="application/json",
-            status_code=200
+            status_code=200,
         )
 
     except Exception as e:
         logging.error(f"Upload failed: {e}")
         return func.HttpResponse(f"Error: {e}", status_code=500)
+
 
 # GET /requests
 
@@ -97,7 +116,7 @@ def list_requests(req: func.HttpRequest) -> func.HttpResponse:
             "request_id": e["RowKey"],
             "filename": e["filename"],
             "status": e["status"],
-            "uploaded_at": e.get("uploaded_at")
+            "uploaded_at": e.get("uploaded_at"),
         }
         for e in entities
     ]
@@ -111,23 +130,22 @@ def get_request(req: func.HttpRequest) -> func.HttpResponse:
     request_id = req.route_params.get("request_id")
     table_client = table_service.get_table_client(TABLE_NAME)
     try:
-        entity = table_client.get_entity(
-            partition_key="AMIE", row_key=request_id)
+        entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
         return func.HttpResponse(json.dumps(entity), mimetype="application/json")
     except Exception:
         return func.HttpResponse("Request not found", status_code=404)
+
 
 # DELETE /requests/{request_id}
 
 
 @app.route(route="requests/{request_id}", methods=["DELETE"])
 def delete_request(req: func.HttpRequest) -> func.HttpResponse:
-    """ Soft delete or cancel an ingestion request """
+    """Soft delete or cancel an ingestion request"""
     request_id = req.route_params.get("request_id")
     table_client = table_service.get_table_client(TABLE_NAME)
     try:
-        entity = table_client.get_entity(
-            partition_key="AMIE", row_key=request_id)
+        entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
         entity["status"] = "deleted"
         entity["deleted_at"] = datetime.datetime.utcnow().isoformat()
         table_client.update_entity(mode="merge", entity=entity)
@@ -135,11 +153,13 @@ def delete_request(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(
             json.dumps({"message": f"Request {request_id} marked as deleted"}),
             mimetype="application/json",
-            status_code=200
+            status_code=200,
         )
     except Exception as e:
         logging.error(f"Failed to delete record: {e}")
-        return func.HttpResponse(f"Request ID not found or could not be deleted: {e}", status_code=404)
+        return func.HttpResponse(
+            f"Request ID not found or could not be deleted: {e}", status_code=404
+        )
 
 
 # POST /requests/{request_id}/retry
@@ -149,27 +169,29 @@ def retry_request(req: func.HttpRequest) -> func.HttpResponse:
     request_id = req.route_params.get("request_id")
     table_client = table_service.get_table_client(TABLE_NAME)
     try:
-        entity = table_client.get_entity(
-            partition_key="AMIE", row_key=request_id)
+        entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
         old_status = entity.get("status")
         entity["status"] = "retrying"
         entity["retried_at"] = datetime.datetime.utcnow().isoformat()
         table_client.update_entity(mode="merge", entity=entity)
 
-        logging.info(
-            f"Request {request_id} retried (previous status: {old_status}).")
+        logging.info(f"Request {request_id} retried (previous status: {old_status}).")
         return func.HttpResponse(
-            json.dumps({
-                "message": f"Retry initiated for request {request_id}",
-                "previous_status": old_status,
-                "new_status": "retrying"
-            }),
+            json.dumps(
+                {
+                    "message": f"Retry initiated for request {request_id}",
+                    "previous_status": old_status,
+                    "new_status": "retrying",
+                }
+            ),
             mimetype="application/json",
-            status_code=200
+            status_code=200,
         )
     except Exception as e:
         logging.error(f"Retry failed: {e}")
-        return func.HttpResponse(f"Request ID not found or retry failed: {e}", status_code=404)
+        return func.HttpResponse(
+            f"Request ID not found or retry failed: {e}", status_code=404
+        )
 
 
 # GET /requests/{request_id}/status
@@ -179,16 +201,16 @@ def get_status(req: func.HttpRequest) -> func.HttpResponse:
     request_id = req.route_params.get("request_id")
     table_client = table_service.get_table_client(TABLE_NAME)
     try:
-        entity = table_client.get_entity(
-            partition_key="AMIE", row_key=request_id)
+        entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
         status = entity.get("status", "unknown")
         return func.HttpResponse(
             json.dumps({"request_id": request_id, "status": status}),
             mimetype="application/json",
-            status_code=200
+            status_code=200,
         )
     except Exception:
         return func.HttpResponse("Request not found", status_code=404)
+
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
     """Extracts plain text from PDF bytes using PyPDF2."""
@@ -223,10 +245,7 @@ def download_file(req: func.HttpRequest) -> func.HttpResponse:
 
     try:
         # Lookup blob info from Table Storage
-        entity = table_client.get_entity(
-            partition_key="AMIE",
-            row_key=request_id
-        )
+        entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
         filename = entity["filename"]
 
         # Download file bytes from blob
@@ -234,17 +253,13 @@ def download_file(req: func.HttpRequest) -> func.HttpResponse:
         data = blob_client.download_blob().readall()
 
         # Return PDF file bytes
-        return func.HttpResponse(
-            body=data,
-            mimetype="application/pdf",
-            status_code=200
-        )
+        return func.HttpResponse(body=data, mimetype="application/pdf", status_code=200)
 
     except Exception as e:
         logging.error(f"Download failed: {e}")
         return func.HttpResponse(f"Error: {e}", status_code=500)
-    
-    
+
+
 @app.route(route="requests/{request_id}/text", methods=["GET"])
 def get_text(req: func.HttpRequest) -> func.HttpResponse:
     """Return extracted text of the manuscript."""
@@ -253,10 +268,7 @@ def get_text(req: func.HttpRequest) -> func.HttpResponse:
 
     try:
         # 1. Get metadata from table
-        entity = table_client.get_entity(
-            partition_key="AMIE",
-            row_key=request_id
-        )
+        entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
         filename = entity["filename"]
 
         # 2. Download PDF bytes
@@ -268,22 +280,16 @@ def get_text(req: func.HttpRequest) -> func.HttpResponse:
 
         if not text:
             return func.HttpResponse(
-                "Text extraction failed or returned empty text.",
-                status_code=422
+                "Text extraction failed or returned empty text.", status_code=422
             )
 
         # 4. Return JSON with the text
         return func.HttpResponse(
-            json.dumps({
-                "request_id": request_id,
-                "filename": filename,
-                "text": text
-            }),
+            json.dumps({"request_id": request_id, "filename": filename, "text": text}),
             mimetype="application/json",
-            status_code=200
+            status_code=200,
         )
 
     except Exception as e:
         logging.error(f"Failed to extract text: {e}")
         return func.HttpResponse(f"Error: {e}", status_code=500)
-
