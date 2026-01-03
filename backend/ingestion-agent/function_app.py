@@ -2,7 +2,6 @@ import azure.functions as func
 from azure.storage.blob import BlobServiceClient
 from azure.data.tables import TableServiceClient, TableEntity
 import logging
-from azure.storage.queue import QueueClient
 import os
 import uuid
 import datetime
