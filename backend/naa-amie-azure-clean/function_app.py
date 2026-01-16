@@ -28,9 +28,9 @@ INGESTION_TABLE = "IngestionRequests"
 
 # === LAZY STORAGE CLIENT HELPER ===
 def get_storage_clients():
-    conn_str = os.getenv("AzureWebJobsStorage")
+    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
     if not conn_str:
-        raise ValueError("Missing AzureWebJobsStorage connection string")
+        raise ValueError("Missing storage connection string (AZURE_STORAGE_CONNECTION_STRING or AzureWebJobsStorage)")
 
     # Import here to keep top-level light
     from azure.storage.blob import BlobServiceClient

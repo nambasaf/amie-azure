@@ -205,6 +205,17 @@ def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         )
         ing_table.update_entity(entity)
 
+        # === 6. TRIGGER AGGREGATION AGENT ===
+        try:
+            import httpx
+            AA_BASE = os.getenv("AA_BASE", "http://localhost:7074/api")
+            aa_url = f"{AA_BASE}/aa/run/{request_id}"
+            logging.info(f"[TRIGGER] Calling AA at {aa_url}")
+            httpx.post(aa_url, timeout=30.0)
+            logging.info(f"[TRIGGER] AA triggered successfully for {request_id}")
+        except Exception as aa_err:
+            logging.warning(f"[TRIGGER] Failed to trigger AA: {aa_err}")
+
         return func.HttpResponse("§102 assessment complete", status_code=200)
 
     except Exception as e:

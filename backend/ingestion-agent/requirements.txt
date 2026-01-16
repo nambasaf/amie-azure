@@ -4,3 +4,4 @@ azure-data-tables
 azure-storage-queue
 PyPDF2
 httpx
+azure-identity

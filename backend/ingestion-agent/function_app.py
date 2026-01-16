@@ -6,59 +6,95 @@ import os
 import uuid
 import datetime
 import json
+
 import tempfile
 from PyPDF2 import PdfReader
+from azure.storage.queue import QueueClient
+from azure.identity import DefaultAzureCredential
+from azure.core.exceptions import ResourceExistsError
+
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 # Retrieve connection string (prefer explicit var, fallback to default)
-AZURE_STORAGE_CONNECTION_STRING = os.getenv(
-    "AZURE_STORAGE_CONNECTION_STRING"
-) or os.getenv("AzureWebJobsStorage")
+
 CONTAINER_NAME = "manuscript-uploads"
 TABLE_NAME = "IngestionRequests"
 
-# Initialize Clients
-blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
-table_service = TableServiceClient.from_connection_string(
-    AZURE_STORAGE_CONNECTION_STRING
-)
-container_client = blob_service.get_container_client(CONTAINER_NAME)
+STORAGE_ACCOUNT_NAME = os.getenv("STORAGE_ACCOUNT_NAME")
 
-# verifying container exists
-try:
-    container_client.create_container()
-except Exception:
-    pass
+def get_queue_client():
+    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
+    if not conn_str:
+        raise RuntimeError("No storage connection string found")
 
-try:
-    table_service.create_table_if_not_exists(table_name=TABLE_NAME)
-except Exception:
-    pass
+    queue_client = QueueClient.from_connection_string(
+        conn_str,
+        queue_name="idca-queue"
+    )
+
+    # Create queue if it doesn't exist
+    try:
+        queue_client.create_queue()
+    except ResourceExistsError:
+        pass  # queue already exists, safe to ignore
+
+    return queue_client
 
 
+def get_blob_service():
+    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
+    if conn_str:
+        return BlobServiceClient.from_connection_string(conn_str)
+        
+    if not STORAGE_ACCOUNT_NAME:
+        raise RuntimeError("Neither AZURE_STORAGE_CONNECTION_STRING nor STORAGE_ACCOUNT_NAME is set")
+
+    return BlobServiceClient(
+        account_url=f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net",
+        credential=DefaultAzureCredential(),
+    )
+
+def get_table_service():
+    conn_str = os.getenv("TABLE_CONNECTION_STRING") or os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
+    if conn_str:
+        return TableServiceClient.from_connection_string(conn_str)
+
+    if not STORAGE_ACCOUNT_NAME:
+        raise RuntimeError("Neither connection string nor STORAGE_ACCOUNT_NAME is set")
+
+    return TableServiceClient(
+        endpoint=f"https://{STORAGE_ACCOUNT_NAME}.table.core.windows.net",
+        credential=DefaultAzureCredential(),
+    )
+
+def get_table_client():
+    service = get_table_service()
+    service.create_table_if_not_exists(TABLE_NAME)
+    return service.get_table_client(TABLE_NAME)
+
+    
 @app.route(route="upload", methods=["POST"])
 def upload(req: func.HttpRequest) -> func.HttpResponse:
     """
     Receives a file upload from the frontend, saves it to Azure Blob Storage,
-    and logs metadata for Application Insights.
+    and enqueues an IDCA job for background processing.
     """
     logging.info("Received upload request.")
     request_id = str(uuid.uuid4())
 
     try:
-        # Get the uploaded file
         uploaded_file = req.files.get("file")
-
         if not uploaded_file:
             return func.HttpResponse("No file provided.", status_code=400)
 
-        # Upload the file to Blob
-        blob_client = container_client.get_blob_client(uploaded_file.filename)
+        # Upload file to Blob Storage
+        blob_service = get_blob_service()
+        container_client = blob_service.get_container_client(CONTAINER_NAME)
+        blob_client = container_client.get_blob_client(uploaded_file.filename)  
         blob_client.upload_blob(uploaded_file.stream.read(), overwrite=True)
-        logging.info(f"File '{uploaded_file.filename}' uploaded to blob storage.")
 
-        # Build ingestion record
+        # Create ingestion record
         entity = {
             "PartitionKey": "AMIE",
             "RowKey": request_id,
@@ -67,23 +103,24 @@ def upload(req: func.HttpRequest) -> func.HttpResponse:
             "uploaded_at": datetime.datetime.utcnow().isoformat(),
         }
 
-        # Insert into Table Storage
+        table_service = get_table_service()
         table_client = table_service.get_table_client(TABLE_NAME)
         table_client.create_entity(entity=entity)
 
-        # ----------------------------------------------------
-        # Automatically trigger IDCA HTTP Function
-        # ----------------------------------------------------
+        # Enqueue IDCA job
         try:
-            import httpx, os
-
-            IDCA_BASE = os.getenv("IDCA_BASE", "http://localhost:7072/api")
-            httpx.post(f"{IDCA_BASE}/idca/run/{request_id}", timeout=5.0)
-            # Optimistically mark as in progress so UI shows spinner immediately
-            entity["status"] = "classifying"
+            queue_client = get_queue_client()
+            queue_client.send_message(request_id)
+            entity["status"] = "queued"
             table_client.update_entity(mode="merge", entity=entity)
-        except Exception as trigger_err:
-            logging.warning(f"Could not trigger IDCA automatically: {trigger_err}")
+        except Exception:
+            logging.error("Failed to enqueue IDCA job", exc_info=True)
+            entity["status"] = "enqueue_failed"
+            table_client.update_entity(mode="merge", entity=entity)
+            return func.HttpResponse(
+                "Upload succeeded but failed to queue processing job",
+                status_code=500,
+            )
 
         return func.HttpResponse(
             json.dumps(
@@ -97,9 +134,10 @@ def upload(req: func.HttpRequest) -> func.HttpResponse:
             status_code=200,
         )
 
-    except Exception as e:
-        logging.error(f"Upload failed: {e}")
-        return func.HttpResponse(f"Error: {e}", status_code=500)
+    except Exception:
+        logging.error("Upload failed", exc_info=True)
+        return func.HttpResponse("Internal server error", status_code=500)
+
 
 
 # GET /requests
@@ -108,17 +146,18 @@ def upload(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="requests", methods=["GET"])
 def list_requests(req: func.HttpRequest) -> func.HttpResponse:
     """List all ingestion requests stored in Table Storage."""
-    table_client = table_service.get_table_client(TABLE_NAME)
+    table_client = get_table_client()
     entities = list(table_client.list_entities())
     results = [
-        {
-            "request_id": e["RowKey"],
-            "filename": e["filename"],
-            "status": e["status"],
-            "uploaded_at": e.get("uploaded_at"),
-        }
-        for e in entities
-    ]
+    {
+        "request_id": e.get("RowKey"),
+        "filename": e.get("filename", None),
+        "status": e.get("status", "unknown"),
+        "uploaded_at": e.get("uploaded_at"),
+    }
+    for e in entities
+]
+
     return func.HttpResponse(json.dumps(results, indent=2), mimetype="application/json")
 
 
@@ -127,6 +166,7 @@ def list_requests(req: func.HttpRequest) -> func.HttpResponse:
 def get_request(req: func.HttpRequest) -> func.HttpResponse:
     """Retrieve one ingestion record."""
     request_id = req.route_params.get("request_id")
+    table_service = get_table_service()
     table_client = table_service.get_table_client(TABLE_NAME)
     try:
         entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
@@ -142,6 +182,7 @@ def get_request(req: func.HttpRequest) -> func.HttpResponse:
 def delete_request(req: func.HttpRequest) -> func.HttpResponse:
     """Soft delete or cancel an ingestion request"""
     request_id = req.route_params.get("request_id")
+    table_service = get_table_service()
     table_client = table_service.get_table_client(TABLE_NAME)
     try:
         entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
@@ -166,6 +207,7 @@ def delete_request(req: func.HttpRequest) -> func.HttpResponse:
 def retry_request(req: func.HttpRequest) -> func.HttpResponse:
     """Retry a failed ingestion by setting status back to 'retrying'."""
     request_id = req.route_params.get("request_id")
+    table_service = get_table_service()
     table_client = table_service.get_table_client(TABLE_NAME)
     try:
         entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
@@ -198,6 +240,7 @@ def retry_request(req: func.HttpRequest) -> func.HttpResponse:
 def get_status(req: func.HttpRequest) -> func.HttpResponse:
     """Return only the status of a given ingestion request."""
     request_id = req.route_params.get("request_id")
+    table_service = get_table_service()
     table_client = table_service.get_table_client(TABLE_NAME)
     try:
         entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
@@ -240,6 +283,7 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
 def download_file(req: func.HttpRequest) -> func.HttpResponse:
     """Return raw PDF bytes for the given request."""
     request_id = req.route_params.get("request_id")
+    table_service = get_table_service()
     table_client = table_service.get_table_client(TABLE_NAME)
 
     try:
@@ -248,6 +292,8 @@ def download_file(req: func.HttpRequest) -> func.HttpResponse:
         filename = entity["filename"]
 
         # Download file bytes from blob
+        blob_service = get_blob_service()
+        container_client = blob_service.get_container_client(CONTAINER_NAME)
         blob_client = container_client.get_blob_client(filename)
         data = blob_client.download_blob().readall()
 
@@ -263,7 +309,8 @@ def download_file(req: func.HttpRequest) -> func.HttpResponse:
 def get_text(req: func.HttpRequest) -> func.HttpResponse:
     """Return extracted text of the manuscript."""
     request_id = req.route_params.get("request_id")
-    table_client = table_service.get_table_client(TABLE_NAME)
+    table_service = get_table_service()
+    table_client = table_service.get_table_client(TABLE_NAME)   
 
     try:
         # 1. Get metadata from table
@@ -271,6 +318,8 @@ def get_text(req: func.HttpRequest) -> func.HttpResponse:
         filename = entity["filename"]
 
         # 2. Download PDF bytes
+        blob_service = get_blob_service()
+        container_client = blob_service.get_container_client(CONTAINER_NAME)
         blob_client = container_client.get_blob_client(filename)
         pdf_bytes = blob_client.download_blob().readall()
 
@@ -292,3 +341,7 @@ def get_text(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error(f"Failed to extract text: {e}")
         return func.HttpResponse(f"Error: {e}", status_code=500)
+
+
+# Import queue workers so Azure Functions registers them
+import idca_queue  # noqa: F401

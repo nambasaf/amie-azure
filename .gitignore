@@ -15,6 +15,9 @@ dist/
 # Log files
 *.log
 
+
+AzuriteConfig
+
 # Environment files (sensitive - contains API keys and secrets)
 .env
 .env.*

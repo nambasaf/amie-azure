@@ -1,0 +1,100 @@
+"""Aggregation Agent (AA) Azure Function
+
+POST /aa/run/{request_id}
+--------------------------
+Executes the Aggregation Agent to produce the final assessment report.
+Reads IDCA and NAA outputs from Table Storage, runs the AA logic,
+and persists the final report back to the table with status 'completed'.
+"""
+
+import azure.functions as func
+import logging
+import os
+import sys
+import json
+import pathlib
+from azure.data.tables import TableServiceClient
+
+# Ensure project root is on path so `backend` package is importable
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+from backend.aa.aa import run_aggregation_agent
+
+app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+
+# Storage configuration
+STORAGE = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
+TABLE_NAME = "IngestionRequests"
+
+
+@app.route(route="aa/run/{request_id}", methods=["POST"])
+def run_aa(req: func.HttpRequest) -> func.HttpResponse:
+    """Execute Aggregation Agent for the given request-id."""
+    request_id = req.route_params.get("request_id")
+    if not request_id:
+        return func.HttpResponse("Missing request_id", status_code=400)
+
+    if not STORAGE:
+        return func.HttpResponse(
+            "Storage connection string not configured", status_code=500
+        )
+
+    try:
+        # Get table client
+        table_service = TableServiceClient.from_connection_string(STORAGE)
+        table = table_service.get_table_client(TABLE_NAME)
+
+        # Retrieve entity
+        entity = table.get_entity("AMIE", request_id)
+
+        # Parse IDCA output
+        idca_output_str = entity.get("idca_output", "{}")
+        try:
+            idca_output = json.loads(idca_output_str)
+        except:
+            idca_output = {}
+
+        # Parse NAA output (if present)
+        naa_output_str = entity.get("naa_output", "{}")
+        try:
+            naa_output_dict = json.loads(naa_output_str) if naa_output_str else {}
+        except:
+            naa_output_dict = {}
+
+        # Convert NAA output dict to object-like structure for compatibility
+        class NAAOutput:
+            def __init__(self, data):
+                self.ss_synopsis = data.get("ss_synopsis", "")
+                self.lor = data.get("lor", [])
+                self.ucs = data.get("ucs", "")
+                self.ssr = data.get("ssr", {})
+
+        naa_output = NAAOutput(naa_output_dict) if naa_output_dict else None
+
+        # Run Aggregation Agent
+        logging.info(f"Running Aggregation Agent for request {request_id}")
+        final_report = run_aggregation_agent(
+            idca_output=idca_output,
+            naa_output=naa_output,
+            naa_assessments=None,  # Not using deep assessments in this version
+            request_id=request_id,
+            table=table,
+        )
+
+        # Update status to completed
+        entity["status"] = "completed"
+        entity["aa_output"] = final_report
+        table.update_entity(entity)
+
+        logging.info(f"AA completed for request {request_id}")
+        return func.HttpResponse(
+            f"Aggregation Agent completed for {request_id}",
+            status_code=200,
+            mimetype="text/plain",
+        )
+
+    except Exception as e:
+        logging.error(f"AA failed for {request_id}: {e}", exc_info=True)
+        return func.HttpResponse(f"AA failed: {e}", status_code=500)

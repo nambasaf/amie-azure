@@ -1,12 +1,8 @@
-"""Queue-trigger function that launches IDCA then NAA
+"""
+Queue-trigger function that launches IDCA then NAA
 
 Queue name: idca-queue
 Message body: plain request-id string
-
-Steps:
-1. Run backend.idca.idca for the request-id (updates status to 'classified').
-2. Immediately trigger the existing NAA HTTP Function so the pipeline
-   continues automatically.
 """
 from __future__ import annotations
 
@@ -14,8 +10,11 @@ import os
 import subprocess
 import pathlib
 import logging
-import azure.functions as func
 import httpx
+import azure.functions as func
+
+# IMPORTANT: attach to the SAME Function App
+from function_app import app
 
 # Resolve project root so Python can import the backend package
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -23,8 +22,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 STORAGE = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
 PYTHON = os.getenv("IDCA_PYTHON", "python")
 
-# Base URL for the NAA Function (worker endpoint)
-NAA_BASE = os.getenv("NAA_BASE", "http://localhost:7071/api")
+# Base URL for the NAA Function
+# Corrected to 7073 as per start_services.ps1
+NAA_BASE = os.getenv("NAA_BASE", "http://localhost:7073/api")
 
 
 def _run_idca(request_id: str):
@@ -39,26 +39,36 @@ def _run_idca(request_id: str):
         STORAGE,
     ]
     logging.info("Starting IDCA for %s", request_id)
-    subprocess.run(cmd, cwd=str(ROOT), check=True)
+    # Use capture_output=True and check=True to see errors in logs
+    result = subprocess.run(
+        cmd,
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=True
+    )
+    logging.info("IDCA stdout: %s", result.stdout)
     logging.info("IDCA finished for %s", request_id)
 
 
-def main(msg: func.QueueMessage):  # noqa: D401
-    request_id = msg.get_body().decode()
+@app.queue_trigger(
+    arg_name="msg",
+    queue_name="idca-queue",
+    connection="AZURE_STORAGE_CONNECTION_STRING",
+)
+def idca_queue(msg: func.QueueMessage):
+    request_id = msg.get_body().decode("utf-8")
+
     if not request_id:
         logging.warning("Received empty message in idca-queue")
         return
 
     try:
         _run_idca(request_id)
-    except Exception as e:  # pragma: no cover
+    except Exception as e:
         logging.exception("IDCA run failed: %s", e)
         return
 
-    # Trigger NAA HTTP Function
-    try:
-        r = httpx.post(f"{NAA_BASE}/worker/run/{request_id}", timeout=5.0)
-        logging.info("Triggered NAA for %s – status %s", request_id, r.status_code)
-    except Exception as e:
-        logging.warning("Failed to trigger NAA: %s", e)
-
+    # IDCA itself will now trigger NAA if an invention is detected.
+    # We no longer need to trigger it here to avoid double-calls.
+    pass
