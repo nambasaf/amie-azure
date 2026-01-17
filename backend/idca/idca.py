@@ -56,6 +56,8 @@ table_service = None
 container = None
 table = None
 
+RUN_NAA = False
+
 
 def init_storage_clients(connection_string: str):
     """Initialize storage clients with the given connection string."""
@@ -338,7 +340,7 @@ def run_idca(request_id: str):
     return response  # stop after classification
 
     try:
-        from naa_brain_MVP.naa_test import run_steps_8_to_12
+        from backend.naa_brain_MVP.naa_test import run_steps_8_to_12
 
         manuscript_text = get_manuscript_text(request_id)
 
@@ -352,7 +354,7 @@ def run_idca(request_id: str):
         if naa_outputs.lor:
             try:
                 import asyncio
-                from naa_brain_MVP.rm_retrieval import download_and_store_rms
+                from backend.naa_brain_MVP.rm_retrieval import download_and_store_rms
 
                 print("\n -------- Downloading Reference Manuscripts...")
                 asyncio.run(
@@ -363,7 +365,7 @@ def run_idca(request_id: str):
 
             # NEW: Assess RMs if any were downloaded
             try:
-                from naa_brain_MVP.rm_assessment import assess_all_rms
+                from backend.naa_brain_MVP.rm_assessment import assess_all_rms
 
                 print("\n -------- Assessing Reference Manuscripts against SSR...")
 

@@ -5,3 +5,4 @@ pypdf
 requests
 httpx
 tqdm
+pypdf
