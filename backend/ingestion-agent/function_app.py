@@ -9,7 +9,7 @@ import json
 
 import tempfile
 from PyPDF2 import PdfReader
-from azure.storage.queue import QueueClient
+from azure.storage.queue import QueueClient, TextBase64EncodePolicy
 from azure.identity import DefaultAzureCredential
 from azure.core.exceptions import ResourceExistsError
 
@@ -30,7 +30,8 @@ def get_queue_client():
 
     queue_client = QueueClient.from_connection_string(
         conn_str,
-        queue_name="idca-queue"
+        queue_name="idca-queue",
+        message_encode_policy=TextBase64EncodePolicy()
     )
 
     # Create queue if it doesn't exist
