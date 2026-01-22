@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
 
@@ -363,81 +364,82 @@ Return ONLY the UCS string.
 # ---------------------------------------------------------------------
 # PIPELINE ORCHESTRATOR (8–11)
 # ---------------------------------------------------------------------
-def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
-    print("Starting NAA workflow...\n")
+# ---------------------------------------------------------------------
+# PIPELINE ORCHESTRATOR (8–11)
+# ---------------------------------------------------------------------
+async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
+    logging.info("Starting NAA workflow...\n")
 
     # -------------------- STEP 8 --------------------
-    print("\n===== SOURCE STRUCTURE (SS) =====")
+    logging.info("\n===== SOURCE STRUCTURE (SS) =====")
     ss = retry_agent(
         lambda: build_source_structure(manuscript_text, idca_output), "SS Agent"
     )
-    print(" [SS AGENT OUTPUT]")
+    logging.info(" [SS AGENT OUTPUT]")
     for blk in ss.blocks:
-        print("  ", blk)
-    print("\n")
+        logging.info(f"  {blk}")
+    logging.info("\n")
 
     # -------------------- STEP 9 --------------------
-    print("\n [SSR AGENT] Building Structural Scoring Rubric...")
+    logging.info("\n [SSR AGENT] Building Structural Scoring Rubric...")
     ssr = retry_agent(lambda: build_ssr(ss), "SSR Agent")
-    print("[SSR AGENT OUTPUT]")
+    logging.info("[SSR AGENT OUTPUT]")
     for item in ssr.items:
-        print("  ", item)
-    print("\n")
+        logging.info(f"  {item}")
+    logging.info("\n")
 
-    print("\n[SSR TABLE]")
-    print(render_ssr_table(ssr))
-    print("\n")
+    logging.info("\n[SSR TABLE]")
+    logging.info(render_ssr_table(ssr))
+    logging.info("\n")
 
     # -------------------- STEP 10 --------------------
-    print("\n[SS SYNOPSIS AGENT] Creating Source Structure Synopsis...")
+    logging.info("\n[SS SYNOPSIS AGENT] Creating Source Structure Synopsis...")
     synopsis = retry_agent(lambda: ss_synopsis(ss), "SS Synopsis Agent")
-    print(" [SS SYNOPSIS OUTPUT]")
-    print("  ", synopsis)
-    print("\n")
+    logging.info(" [SS SYNOPSIS OUTPUT]")
+    logging.info(f"  {synopsis}")
+    logging.info("\n")
 
     # -------------------- STEP 11 --------------------
-    print("\n [UCS AGENT] Generating Unified Composite Search String...")
+    logging.info("\n [UCS AGENT] Generating Unified Composite Search String...")
     ucs = retry_agent(lambda: build_ucs(ss), "UCS Agent")
-    print("[UCS OUTPUT]")
-    print("  ", ucs)
-    print("\n")
+    logging.info("[UCS OUTPUT]")
+    logging.info(f"  {ucs}")
+    logging.info("\n")
 
     # -------------------- STEP 12 --------------------
-    print(
+    logging.info(
         "\n [PRIOR ART SEARCH] Executing PARALLEL PROGRESSIVE SEARCH (OpenAlex + Patents + Web)..."
     )
 
-    # We need to run the async search from this synchronous function
-    import asyncio
-    from naa_brain_MVP.search.search_orchestrator import (
+    from backend.naa_brain_MVP.search.search_orchestrator import (
         progressive_search as parallel_progressive_search,
     )
 
     try:
-        # Run async loop
-        final_query, LoR = asyncio.run(parallel_progressive_search(ucs, target_total=5))
+        # Run async search directly
+        final_query, LoR = await parallel_progressive_search(ucs, target_total=5)
 
-        print("\n[STEP 12 OUTPUT]")
-        print(" PRIOR ART QUERY:", final_query if final_query else "(none)")
-        print(" REFERENCES FOUND:", len(LoR))
+        logging.info("\n[STEP 12 OUTPUT]")
+        logging.info(f" PRIOR ART QUERY: {final_query if final_query else '(none)'}")
+        logging.info(f" REFERENCES FOUND: {len(LoR)}")
 
         if not LoR:
-            print(" No Reference Manuscripts found — UCS may be too strict.")
+            logging.info(" No Reference Manuscripts found — UCS may be too strict.")
         else:
-            print("\n FIRST FIVE REFERENCES:")
+            logging.info("\n FIRST FIVE REFERENCES:")
             for ref in LoR[:5]:
-                print(
-                    f" - [{ref['source']}] {ref['title']} ({ref['year']}) → {ref['url']}"
+                logging.info(
+                    f" - [{ref['source']}] {ref['title']} ({ref.get('year', 'N/A')}) → {ref['url']}"
                 )
 
     except Exception as e:
-        print("\n[STEP 12 ERROR]")
-        print("  Prior-art search failed:")
-        print("    ", str(e))
-        print("    (Pipeline continues — UCS or APIs may be malformed or unavailable)")
+        logging.error("\n[STEP 12 ERROR]")
+        logging.error("  Prior-art search failed:")
+        logging.error(f"    {str(e)}")
+        logging.error("    (Pipeline continues — UCS or APIs may be malformed or unavailable)")
         import traceback
 
-        traceback.print_exc()
+        logging.error(traceback.format_exc())
         final_query, LoR = None, []
 
     return NAAOutputs(ss=ss, ssr=ssr, ss_synopsis=synopsis, ucs=ucs, lor=LoR)

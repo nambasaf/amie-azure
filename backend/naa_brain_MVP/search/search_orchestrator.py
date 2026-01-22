@@ -100,7 +100,7 @@ async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List
             LoR.append(r)
             seen_ids.add(r["url"])
 
-    print(f"  → Found {len(LoR)} unique results.")
+    print(f"  -> Found {len(LoR)} unique results.")
 
     if len(LoR) >= target_total:
         return ucs, LoR
