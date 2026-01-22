@@ -151,8 +151,9 @@ def get_status(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # === POST /worker/run/{request_id} — RUN §102 ANALYSIS ===
+# === POST /worker/run/{request_id} — RUN §102 ANALYSIS ===
 @app.route(route="worker/run/{request_id}", methods=["POST"])
-def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
+async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
     """Full NAA pipeline (Steps 8–17) implemented via naa_brain_MVP modules."""
     request_id = req.route_params.get("request_id")
 
@@ -177,15 +178,15 @@ def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # 1. Run full NAA pipeline (Steps 8-12)
         # ------------------------------------------------------------------
         manuscript_text = get_manuscript_text(filename)
-        naa_outputs = run_steps_8_to_12(manuscript_text, idca_output)
+        # Fix: Await the async pipeline
+        naa_outputs = await run_steps_8_to_12(manuscript_text, idca_output)
 
         # ------------------------------------------------------------------
         # 2. Retrieve Reference Manuscripts (Step 13)
         # ------------------------------------------------------------------
         try:
-            asyncio.run(
-                download_and_store_rms(request_id, naa_outputs.lor, blob_service)
-            )
+            # Fix: Await directly
+            await download_and_store_rms(request_id, naa_outputs.lor, blob_service)
         except Exception as e:
             logging.warning(f"RM retrieval failed: {e}")
 
@@ -195,13 +196,12 @@ def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         assessments = None
         try:
             if naa_outputs.lor:
-                assessments = asyncio.run(
-                    assess_all_rms(
-                        request_id,
-                        blob_service,
-                        naa_outputs.ssr,
-                        naa_outputs.ss_synopsis,
-                    )
+                # Fix: Await directly
+                assessments = await assess_all_rms(
+                    request_id,
+                    blob_service,
+                    naa_outputs.ssr,
+                    naa_outputs.ss_synopsis,
                 )
         except Exception as e:
             logging.warning(f"RM assessment failed: {e}")

@@ -93,11 +93,19 @@ async def search_openalex(query: str, limit: int = 50):
     
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         # Try first page with original query
+        logging.info(f"OpenAlex Request URL: {base}&page={page}")
         data = await fetch_page(client, f"{base}&page={page}")
         
-        # Check for query incompatibility (500 error or None response)
-        if data is None:
-            logging.warning(f"OpenAlex query failed, attempting sanitization...")
+        # Check for query incompatibility (500 error or None response or EMPTY results)
+        # We treat count=0 as a potential syntax/specificity issue causing "no match"
+        is_empty = False
+        if data and "meta" in data and data["meta"].get("count", 0) == 0:
+            is_empty = True
+            logging.warning(f"OpenAlex query returned 0 results. Triggering sanitization fallback...")
+
+        if data is None or is_empty:
+            if data is None:
+                logging.warning(f"OpenAlex query failed (network/server error), attempting sanitization...")
             
             # Sanitize and retry
             sanitized_query = sanitize_for_openalex(query)
@@ -112,10 +120,14 @@ async def search_openalex(query: str, limit: int = 50):
                 f"&mailto={EMAIL}"
             )
             
+            logging.info(f"OpenAlex Request URL (Sanitized): {base}&page={page}")
             data = await fetch_page(client, f"{base}&page={page}")
             
             if data is None:
                 logging.error("OpenAlex sanitized query also failed. Skipping OpenAlex.")
+                return []
+            if data and "meta" in data and data["meta"].get("count", 0) == 0:
+                logging.warning("OpenAlex sanitized query returned 0 results.")
                 return []
         
         # Process results
