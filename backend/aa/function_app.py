@@ -62,6 +62,13 @@ def run_aa(req: func.HttpRequest) -> func.HttpResponse:
             naa_output_dict = json.loads(naa_output_str) if naa_output_str else {}
         except:
             naa_output_dict = {}
+        
+        naa_assessments = naa_output_dict.get("assessments")
+        logging.info(
+            f"[AA INPUT] assessments_count="
+            f"{len(naa_assessments) if naa_assessments else 0}"
+        )
+
 
         # Convert NAA output dict to object-like structure for compatibility
         class NAAOutput:
@@ -78,7 +85,7 @@ def run_aa(req: func.HttpRequest) -> func.HttpResponse:
         final_report = run_aggregation_agent(
             idca_output=idca_output,
             naa_output=naa_output,
-            naa_assessments=None,  # Not using deep assessments in this version
+            naa_assessments=naa_assessments,  # Not using deep assessments in this version
             request_id=request_id,
             table=table,
         )

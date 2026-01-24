@@ -1,22 +1,20 @@
 # -------------------------------------------------------------
-# AGGREGATION AGENT (AA) – production version moved from idca/aa.py
+# AGGREGATION AGENT (AA) – SSOW-STRICT PRODUCTION VERSION
 # -------------------------------------------------------------
-"""Aggregation Agent logic implementing SSOW Steps 18–19.
+"""
+Aggregation Agent logic implementing SSOW Steps 18–19.
 
-This module exposes a single public function:
-    run_aggregation_agent(idca_output: dict, naa_output, naa_assessments=None,
-                          request_id: str | None = None, table=None) -> str
+This agent acts as a NOVELTY ADJUDICATOR.
+It relies exclusively on NAA structural assessments (CSS / EWSS).
 
-It constructs the AA prompt according to the workflow and executes an Azure
-AI Agent (using `AGGREGATION_AGENT_ID`).  If a Table Storage client and
-request-id are provided it will persist the AA output.
+Public entrypoint:
+    run_aggregation_agent(idca_output, naa_output, naa_assessments, ...)
 """
 
 from __future__ import annotations
 
 import os
-import json
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 from dotenv import load_dotenv
 from azure.ai.agents import AgentsClient
@@ -52,8 +50,6 @@ agents_client = AgentsClient(
 # ------------------------------------------------------------------
 # HELPER – RUN AGENT ONCE
 # ------------------------------------------------------------------
-
-
 def _run_aa(prompt: str) -> str:
     """Creates a thread, sends user prompt, runs AA, returns final reply text."""
     thread = agents_client.threads.create()
@@ -73,135 +69,144 @@ def _run_aa(prompt: str) -> str:
     for m in reversed(msgs):
         if m.role == "assistant" and m.text_messages:
             return m.text_messages[-1].text.value.strip()
+
     raise RuntimeError("Aggregation Agent returned no assistant output")
 
-
 # ------------------------------------------------------------------
-# PROMPT BUILDER (covers SSOW logic)
+# PROMPT BUILDER (SSOW-STRICT)
 # ------------------------------------------------------------------
-
-
 def build_prompt(
     idca_output: dict[str, Any],
     naa_output: Any,
-    naa_assessments: Optional[list[Any]] = None,
+    naa_assessments: Optional[List[dict]] = None,
 ) -> str:
-    """Returns the final prompt string to feed to the Aggregation Agent."""
+    """Builds a STRICT SSOW prompt for the Aggregation Agent."""
+
     citation = idca_output.get("source_citation", "Unknown Citation")
-    status = idca_output.get("status_determination")
+    status = idca_output.get("status_determination", "").strip().lower()
+    idca_output["status_determination"] = (
+        "Present" if status == "present" else idca_output.get("status_determination")
+    )
+
+    print(
+    f"[AA DEBUG] CASE CHECK -> status={idca_output.get('status_determination')}, "
+    f"assessments={len(naa_assessments or [])}"
+)
+
+
     justification = idca_output.get("justification", "")
 
     ss_synopsis = getattr(naa_output, "ss_synopsis", "Not available")
 
-    # ---------------- CASE A – No Invention Present ----------------
+    # ------------------------------------------------------------
+    # CASE A — NO INVENTION PRESENT
+    # ------------------------------------------------------------
     if status != "Present":
         return f"""
-IDCA Output:
-Status: {status}
-Citation: {citation}
-Justification: {justification}
+**AMIE Final Results**
 
-No NAA output.
+*Source Manuscript*: {citation}
 
-Please produce the 'No Invention Present' final report.
+IDCA Determination:
+No invention present.
+
+Justification:
+{justification}
 """
 
-    # ---------------- CASE B – Invention Present ----------------
-    context_header = f"**AMIE Final Results**\n*Source Manuscript*: {citation}\n*Source Structure*: {ss_synopsis}\n"
+    # ------------------------------------------------------------
+    # CASE B — INVENTION PRESENT, BUT NO ASSESSMENTS
+    # ------------------------------------------------------------
+    if not naa_assessments:
+        return f"""
+**AMIE Final Results**
 
-    # ------------ Deep-analysis path (assessments present) --------
-    if naa_assessments:
-        sorted_assess = sorted(
-            naa_assessments, key=lambda a: a.sos_score["ewss"], reverse=True
+*Source Manuscript*: {citation}
+*Source Structure*: {ss_synopsis}
+
+Novelty cannot be determined due to missing structural assessment data.
+"""
+
+    # ------------------------------------------------------------
+    # CASE C — INVENTION PRESENT + STRUCTURAL ASSESSMENTS
+    # ------------------------------------------------------------
+    # Sort by EWSS descending
+    sorted_assessments = sorted(
+        naa_assessments,
+        key=lambda a: a["scores"]["ewss"],
+        reverse=True,
+    )
+
+    # Build Final Reference Table (FRT)
+    frt_md = "| Citation | RS Synopsis | CSS | EWSS |\n"
+    frt_md += "|---|---|---|---|\n"
+
+    for a in sorted_assessments:
+        frt_md += (
+            f"| {a['reference_citation']} "
+            f"| {a['rs_synopsis']} "
+            f"| {a['scores'].get('css', 0):.2f} "
+            f"| {a['scores'].get('ewss', 0):.2f} |\n"
         )
-        frt_md = "| Citation | RS Synopsis | CSS | EWSS |\n|---|---|---|---|\n"
-        for a in sorted_assess:
-            css = a.sos_score.get("css", 0)
-            ewss = a.sos_score.get("ewss", 0)
-            cit = (
-                a.reference_citation.replace("\n", " ")[:100] + "..."
-                if len(a.reference_citation) > 100
-                else a.reference_citation
-            )
-            syn = a.rs_synopsis.replace("\n", " ")
-            frt_md += f"| {cit} | {syn} | {css} | {ewss} |\n"
 
-        return f"""
-{context_header}
+    # Deterministic novelty rule
+    max_ewss = sorted_assessments[0]["scores"]["ewss"]
 
-INSTRUCTIONS FOR FINAL REPORT:
-1. You are the Aggregation Agent (AA).
-2. Display the Final Reference Table (FRT) exactly as provided below.
-3. Keep the Context Header above the table.
-4. Do NOT add any extra sections beyond the FRT.
+    if max_ewss >= 0.90:
+        determination = "NOT NOVEL"
+        cause_refs = [
+            a["reference_citation"]
+            for a in sorted_assessments
+            if a["scores"]["ewss"] >= 0.90
+        ]
+    else:
+        determination = "NOVEL"
+        cause_refs = []
 
-DATA TO DISPLAY:\n\n{frt_md}
-"""
-
-    # ------------ Fallback paths (no assessments) -----------------
-    lor = getattr(naa_output, "lor", [])
-    if not lor:
-        return f"""
-IDCA Output:
-Status: {status}
-Citation: {citation}
-
-NAA Output Summary:
-NAA produced Source Structure, SSR, SS Synopsis, and UCS.
-Parallel search produced NO reference manuscripts.
-
-Please conclude the manuscript is provisionally NOVEL. Do NOT display SS/SSR/UCS blocks.
-"""
-
-    # Search results available but no deep analysis
-    ref_table = "| Source | Year | Title | URL |\n|---|---|---|---|\n"
-    for r in lor[:10]:
-        ref_table += f"| {r.get('source')} | {r.get('publication_date', '')[:4]} | {r.get('title')} | {r.get('url', '')} |\n"
+    cause_text = (
+        "This determination is based on high structural overlap (EWSS ≥ 0.90) with:\n- "
+        + "\n- ".join(cause_refs)
+        if cause_refs
+        else f"The highest observed EWSS was {max_ewss:.2f}, below the anticipation threshold."
+    )
 
     return f"""
-IDCA Output:
-Status: {status}
-Citation: {citation}
+**AMIE Final Results**
 
-NAA Output Summary:
-Source Structure, SSR, SS Synopsis, UCS all generated.
+*Source Manuscript*: {citation}
+*Source Structure*: {ss_synopsis}
 
-PRIOR ART SEARCH RESULTS (No Deep Analysis):\n\n{ref_table}
+### Final Reference Table (Structural Comparisons)
+{frt_md}
 
-INSTRUCTIONS FOR FINAL REPORT:
-1. Display the Table above.
-2. Provide a short novelty assessment based on the titles/abstracts.
+### Novelty Determination
+This manuscript is **{determination}**.
+
+{cause_text}
 """
-
 
 # ------------------------------------------------------------------
 # PUBLIC API
 # ------------------------------------------------------------------
-
-
 def run_aggregation_agent(
     idca_output: dict[str, Any],
     naa_output: Any,
-    naa_assessments: Optional[list[Any]] = None,
+    naa_assessments: Optional[List[dict]] = None,
     *,
     request_id: str | None = None,
     table=None,
 ) -> str:
-    """Executes AA prompt with retries and persists to Table if provided."""
+    """Executes AA prompt with retries and persists output if requested."""
 
     prompt = build_prompt(idca_output, naa_output, naa_assessments)
 
-    def _exec():
-        return _run_aa(prompt)
-
-    final_report = retry_agent(_exec, "Aggregation Agent")
+    final_report = retry_agent(lambda: _run_aa(prompt), "Aggregation Agent")
 
     if request_id and table:
         try:
             entity = table.get_entity("AMIE", request_id)
             entity["aa_output"] = final_report
             table.update_entity(entity)
-            print(f"[TABLE] AA output stored for {request_id}")
         except Exception as exc:
             print(f"[TABLE] Failed to persist AA output: {exc}")
 

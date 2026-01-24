@@ -116,7 +116,7 @@ Example:
 4. STRUCTURAL SYNOPSIS (One Sentence)
 ===========================================
 Write a ONE-SENTENCE summary of the SS following:
-actor → operation → object/outcome
+actor -> operation -> object/outcome
 
 Rules:
 - present tense
@@ -181,7 +181,7 @@ def get_manuscript_text(request_id: str) -> str:
 
     if not text or len(text) < 100:
         print(" PyPDF2 returned very little text — this PDF may be scanned.")
-        print("→ If so, we will need to switch to pdfminer or OCR.")
+        print("-> If so, we will need to switch to pdfminer or OCR.")
 
     return text
 
@@ -196,6 +196,18 @@ def send_in_chunks(thread_id, text, chunk_size=5000):
 
 # ------------------- Run IDCA -------------------
 def run_idca(request_id: str):
+    # ------------------- IDEMPOTENCY GUARD -------------------
+    try:
+        entity = table.get_entity("AMIE", request_id)
+        current_status = entity.get("status")
+
+        # If IDCA is already running or already finished, do NOT restart
+        if current_status in ("classifying", "classified", "naa_running", "completed"):
+            print(f"[GUARD] IDCA already {current_status} for {request_id}. Exiting.")
+            return
+    except Exception as e:
+        print(f"[GUARD] Could not read status for {request_id}: {e}. Proceeding.")
+
     manuscript = get_manuscript_text(request_id)
     print("\n--- MANUSCRIPT SIZE:", len(manuscript), "characters ---\n")
 

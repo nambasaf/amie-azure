@@ -16,7 +16,6 @@ if str(REPO_ROOT) not in sys.path:
 from backend.naa_brain_MVP.naa_test import run_steps_8_to_12
 from backend.naa_brain_MVP.rm_retrieval import download_and_store_rms
 from backend.naa_brain_MVP.rm_assessment import assess_all_rms
-from backend.aa import run_aggregation_agent
 from prior_art_open import search_prior_art
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
@@ -209,54 +208,72 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # ------------------------------------------------------------------
         # 4. Assemble NAA output JSON
         # ------------------------------------------------------------------
+        
+        source_citation = idca_output.get("source_citation", "Unknown Citation")
+
         naa_output_json = {
             "ss_synopsis": naa_outputs.ss_synopsis,
-            "ucs": naa_outputs.ucs,
-            "lor": naa_outputs.lor,
+            "source_citation": source_citation,
+            "assessments": []
         }
+
         if assessments:
-            naa_output_json["assessments"] = [a.__dict__ for a in assessments]
+            for a in assessments:
+                naa_output_json["assessments"].append(
+                    {
+                        "reference_citation": a.reference_citation,
+                        "rs_synopsis": a.rs_synopsis,
+                        "scores": {
+                            "css": a.sos_score.get("css", 0),
+                            "ewss": a.sos_score.get("ewss", 0),
+                        },
+                        "status_determination": a.status_determination,
+                    }
+                )
 
         # ------------------------------------------------------------------
         # 5. Persist NAA results to Table Storage
         # ------------------------------------------------------------------
         entity.update(
             {
-                "status": "assessed",
+                "status": "naa_completed",  # Mark as ready for AA
                 "naa_output": json.dumps(naa_output_json),
             }
         )
         ing_table.update_entity(entity)
-        logging.info(f"NAA completed for {request_id}, starting Aggregation Agent...")
+        logging.info(f"NAA completed for {request_id}, triggering Aggregation Agent...")
 
         # ------------------------------------------------------------------
-        # 6. Run Aggregation Agent (SSOW Steps 18-19)
+        # 6. Trigger Aggregation Agent (via HTTP)
         # ------------------------------------------------------------------
         try:
-            final_report = run_aggregation_agent(
-                idca_output=idca_output,
-                naa_output=naa_outputs,
-                naa_assessments=assessments,
-                request_id=request_id,
-                table=ing_table,
-            )
-            logging.info(f"Aggregation Agent completed for {request_id}")
+            import httpx
+            
+            # Use environment variable for AA URL, default to local port 7074
+            aa_base_url = os.getenv("AA_SERVICE_URL", "http://localhost:7074/api")
+            aa_url = f"{aa_base_url}/aa/run/{request_id}"
+            
+            logging.info(f"[TRIGGER] Posting to AA Service at {aa_url}")
+            
+            # Fire and forget (or wait for confirmation of trigger, but AA is long running)
+            # Since AA is a function app, we generally want to wait for the response to know it started?
+            # actually AA runs synchronously in its function, so we might want to wait or use a durable pattern.
+            # For now, we await the POST response to ensure it started successfully.
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                 resp = await client.post(aa_url)
+                 resp.raise_for_status()
 
-            # Update status to completed after AA finishes
-            entity = ing_table.get_entity("AMIE", request_id)
-            entity["status"] = "completed"
-            entity["completed_at"] = datetime.datetime.utcnow().isoformat()
-            ing_table.update_entity(entity)
+            logging.info(f"[TRIGGER] Aggregation Agent triggered successfully for {request_id}")
 
         except Exception as aa_error:
-            logging.error(f"Aggregation Agent failed for {request_id}: {aa_error}")
-            # Still mark as assessed even if AA fails
+            logging.error(f"Failed to trigger Aggregation Agent for {request_id}: {aa_error}")
+            # We do NOT mark as completed. It stays as 'naa_completed' (or 'assessed').
+            # We could mark as failed_aa_trigger if we want.
             entity = ing_table.get_entity("AMIE", request_id)
-            entity["status"] = "assessed"
-            entity["aa_error"] = str(aa_error)
+            entity["aa_error"] = f"Trigger Failed: {str(aa_error)}"
             ing_table.update_entity(entity)
 
-        return func.HttpResponse("NAA and AA assessment complete", status_code=200)
+        return func.HttpResponse("NAA completed, AA triggered", status_code=200)
     # --- end of function ---
 
     except Exception as exc:

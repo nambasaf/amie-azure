@@ -38,7 +38,7 @@ PYTHON = os.getenv("IDCA_PYTHON", sys.executable)
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 
-@app.route(route="idca/run/{request_id}", methods=["POST", "GET"])
+@app.route(route="idca/run/{request_id}", methods=["POST"])
 def run_idca(req: func.HttpRequest) -> func.HttpResponse:  # noqa: D401
     """Kick off IDCA for the given request-id in a background process."""
     request_id = req.route_params.get("request_id")

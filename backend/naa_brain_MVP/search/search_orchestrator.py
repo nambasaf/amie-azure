@@ -110,7 +110,7 @@ async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List
     blocks = split_ucs(ucs)
 
     if len(blocks) <= 1:
-        print("  → Only 1 block, cannot broaden further.")
+        print(" -> Only 1 block, cannot broaden further.")
         return ucs, LoR
 
     final_query = ucs
@@ -139,7 +139,7 @@ async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List
                 seen_ids.add(r["url"])
                 added_count += 1
 
-        print(f"  → Added {added_count} new. Total: {len(LoR)}")
+        print(f" -> Added {added_count} new. Total: {len(LoR)}")
 
         # Update final_query to the last successful broadening
         if added_count > 0:
