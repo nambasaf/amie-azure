@@ -408,8 +408,18 @@ async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutput
 
     # -------------------- STEP 12 --------------------
     logging.info(
-        "\n [PRIOR ART SEARCH] Executing PARALLEL PROGRESSIVE SEARCH (OpenAlex + Patents + Web)..."
+        "\n [PRIOR ART SEARCH] Executing PARALLEL PROGRESSIVE SEARCH (OpenAlex + PatentsView + Semantic Scholar)..."
     )
+
+    # Fallback: if UCS is empty or too short, use SS synopsis or manuscript excerpt so search still runs
+    search_query = (ucs or "").strip()
+    if len(search_query) < 20:
+        search_query = (synopsis or "").strip()[:500] or (manuscript_text or "")[:500].strip()
+        if search_query:
+            logging.info(f"UCS empty/short — using fallback query ({len(search_query)} chars) for prior-art search")
+        else:
+            search_query = "prior art"  # last resort
+            logging.warning("UCS and fallback empty — using minimal query 'prior art'")
 
     from backend.naa_brain_MVP.search.search_orchestrator import (
         progressive_search as parallel_progressive_search,
@@ -417,7 +427,7 @@ async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutput
 
     try:
         # Run async search directly
-        final_query, LoR = await parallel_progressive_search(ucs, target_total=5)
+        final_query, LoR = await parallel_progressive_search(search_query, target_total=5)
 
         logging.info("\n[STEP 12 OUTPUT]")
         logging.info(f" PRIOR ART QUERY: {final_query if final_query else '(none)'}")

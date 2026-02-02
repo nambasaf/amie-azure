@@ -79,77 +79,81 @@ async def download_pdf(url: str) -> bytes:
         return content
 
 
+async def _search_api_get(client: httpx.AsyncClient, base_url: str, q: dict, f: list, api_key: str):
+    """GET request to PatentsView Search API (api.patentsview.org is discontinued; use search.patentsview.org)."""
+    import urllib.parse
+    import json as _json
+    qs = urllib.parse.quote(_json.dumps(q))
+    fs = urllib.parse.quote(_json.dumps(f))
+    url = f"{base_url}?q={qs}&f={fs}"
+    headers = {"X-Api-Key": api_key}
+    return await client.get(url, headers=headers)
+
+
 async def retrieve_patent_text(patent_id: str, api_key: str) -> str:
     """
-    Retrieves patent text from PatentsView API.
-    
+    Retrieves patent text from PatentsView Search API (search.patentsview.org).
+    The old api.patentsview.org/patents/query is discontinued (410).
+
     Priority (MVP):
-    1. Independent claims only
-    2. Fallback to abstract if claims unavailable
+    1. Claims from g_claim endpoint (independent claims preferred)
+    2. Fallback to abstract from patent endpoint
     3. Truncate to 30,000 characters for LLM context limits
-    
-    Returns plain text string.
     """
-    url = "https://api.patentsview.org/patents/query"
-    
-    # Query for specific patent
-    payload = {
-        "q": {"patent_number": patent_id},
-        "f": [
-            "patent_number",
-            "patent_title",
-            "patent_abstract",
-            "claims"
-        ]
-    }
-    
+    base_patent = "https://search.patentsview.org/api/v1/patent/"
+    base_claims = "https://search.patentsview.org/api/v1/g_claim/"
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            headers = {"X-Api-Key": api_key}
-            resp = await client.post(url, json=payload, headers=headers)
-            
+            # 1. Get patent title + abstract (Search API uses patent_id)
+            resp = await _search_api_get(
+                client, base_patent,
+                q={"patent_id": patent_id},
+                f=["patent_id", "patent_title", "patent_abstract"],
+                api_key=api_key,
+            )
             if resp.status_code != 200:
-                logging.error(f"PatentsView API error {resp.status_code}: {resp.text}")
+                logging.error(f"PatentsView Search API error {resp.status_code}: {resp.text[:200]}")
                 raise ValueError(f"Failed to retrieve patent {patent_id}")
-            
+
             data = resp.json()
             patents = data.get("patents", [])
-            
             if not patents:
                 raise ValueError(f"Patent {patent_id} not found")
-            
             patent = patents[0]
-            
-            # Extract claims (list of claim objects)
-            claims = patent.get("claims", [])
-            
-            # Filter for independent claims only (claim_sequence starts with 1, 2, etc.)
-            # Independent claims typically don't have dependencies
+            abstract = patent.get("patent_abstract", "") or ""
+            title = patent.get("patent_title", "") or ""
+
+            # 2. Get claims from g_claim endpoint
+            resp_claims = await _search_api_get(
+                client, base_claims,
+                q={"patent_id": patent_id},
+                f=["claim_text", "claim_sequence", "claim_dependent"],
+                api_key=api_key,
+            )
             independent_claims = []
-            for claim in claims:
-                claim_text = claim.get("claim_text", "")
-                # Simple heuristic: independent claims are usually first few and don't start with "The ... of claim"
-                if claim_text and not claim_text.strip().lower().startswith(("the", "a")):
-                    independent_claims.append(claim_text)
-                # Limit to first 3 independent claims for MVP
-                if len(independent_claims) >= 3:
-                    break
-            
-            # Build text content
+            if resp_claims.status_code == 200:
+                cdata = resp_claims.json()
+                claims_list = cdata.get("g_claims", [])
+                for claim in sorted(claims_list, key=lambda x: x.get("claim_sequence", 0)):
+                    ct = claim.get("claim_text", "")
+                    dep = claim.get("claim_dependent")
+                    if ct and (dep is None or dep == ""):
+                        independent_claims.append(ct)
+                    if len(independent_claims) >= 3:
+                        break
+
             if independent_claims:
                 text = "\n\n".join([f"Claim {i+1}: {c}" for i, c in enumerate(independent_claims)])
             else:
-                # Fallback to abstract
-                text = patent.get("patent_abstract", "")
-                if not text:
-                    raise ValueError(f"No claims or abstract available for patent {patent_id}")
-            
-            # Truncate to 30,000 characters
+                text = abstract or title or ""
+            if not text:
+                raise ValueError(f"No claims or abstract available for patent {patent_id}")
+
             if len(text) > 30000:
                 text = text[:30000] + "\n\n[Truncated for context limits]"
-            
             return text
-            
+
     except Exception as e:
         logging.error(f"Failed to retrieve patent text for {patent_id}: {e}")
         raise

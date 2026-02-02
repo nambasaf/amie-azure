@@ -2,6 +2,8 @@ import React from 'react';
 import HeroSection from './components/HeroSection';
 import HowItWorks from './components/HowItWorks';
 import RequestTable from './components/RequestTable';
+import Footer from './components/Footer';
+import FadeIn from './components/FadeIn';
 import { ThemeProvider, CssBaseline, Container, Stack } from '@mui/material';
 import theme from './theme';
 import AppBar from '@mui/material/AppBar';
@@ -168,27 +170,38 @@ function App() {
       />
       <CssBaseline />
       <AppBar position="static" elevation={0} sx={{ borderBottom: '1px solid', borderColor: 'primary.main', boxShadow: `0 0 6px 0 ${theme.palette.primary.main}` }}>
-        <Toolbar sx={{ flexDirection: 'column', alignItems: 'center', py: 1 }}>
-          <Typography variant="h5" sx={{ color: 'primary.main', fontWeight: 700, letterSpacing: 1 }}>
-            AMIE
-          </Typography>
-          <Typography variant="caption" sx={{ color: '#ddd', fontStyle: 'italic' }}>
-            Academic Manuscript IP Evaluator
-          </Typography>
+        <Toolbar sx={{ flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', py: 1.5, px: 2, gap: 1 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <Typography component="a" href="#" variant="h6" sx={{ color: 'primary.main', fontWeight: 700, letterSpacing: 1, textDecoration: 'none', '&:hover': { color: 'primary.light' } }}>
+              AMIE
+            </Typography>
+            <Typography variant="caption" sx={{ color: '#aaa', fontStyle: 'italic', borderLeft: '1px solid rgba(255,111,0,0.4)', pl: 2 }}>
+              Academic Manuscript IP Evaluator
+            </Typography>
+          </Box>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+            <Typography component="a" href="https://research.oregonstate.edu" target="_blank" rel="noopener noreferrer" variant="body2" sx={{ color: '#ccc', textDecoration: 'none', '&:hover': { color: 'primary.main' } }}>
+              Division of Research &amp; Innovation
+            </Typography>
+            <Typography sx={{ color: 'rgba(255,255,255,0.3)' }}>|</Typography>
+            <Typography component="a" href="https://oregonstate.edu" target="_blank" rel="noopener noreferrer" variant="body2" sx={{ color: '#ccc', textDecoration: 'none', '&:hover': { color: 'primary.main' } }}>
+              OSU Home
+            </Typography>
+          </Box>
         </Toolbar>
       </AppBar>
 
-      <Container maxWidth="md" sx={{ py:4 }}>
-        <Stack spacing={6}>
+      <Container maxWidth="md" sx={{ py: 4 }}>
+        <Stack spacing={8}>
           <HeroSection />
           <HowItWorks />
-          <RequestTable />
+          <FadeIn direction="up" distance={20}>
+            <RequestTable />
+          </FadeIn>
         </Stack>
       </Container>
 
-      <footer style={{ width: '100%', textAlign: 'center', padding: '1rem 0', backgroundColor: '#111', fontSize: '0.8rem' }}>
-        <span style={{ color: theme.palette.primary.main }}>AMIE v1.0</span>&nbsp;|&nbsp;Oregon State University
-      </footer>
+      <Footer />
     </ThemeProvider>
   );
 }

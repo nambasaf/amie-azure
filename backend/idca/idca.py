@@ -290,11 +290,14 @@ def run_idca(request_id: str):
             )
             # Mark as completed for the UI
             from datetime import datetime
+
             entity = table.get_entity("AMIE", request_id)
             entity["status"] = "completed"
             entity["completed_at"] = datetime.utcnow().isoformat()
             table.update_entity(entity)
-            print(f"[STATUS] Set to 'completed' for request {request_id} (No invention)")
+            print(
+                f"[STATUS] Set to 'completed' for request {request_id} (No invention)"
+            )
         except Exception as e:
             print("\n Aggregation Agent failed:", str(e))
 
@@ -308,7 +311,7 @@ def run_idca(request_id: str):
                 import httpx
                 import os
 
-                NAA_BASE = os.getenv("NAA_BASE", "http://localhost:7073/api")
+                NAA_BASE = os.getenv("NAA_BASE", "http://localhost:7074/api")
                 naa_url = f"{NAA_BASE}/worker/run/{request_id}"
                 print(f"\n[TRIGGER] Calling NAA at {naa_url}")
                 httpx.post(naa_url, timeout=30.0)
@@ -329,7 +332,7 @@ def run_idca(request_id: str):
             import httpx
             import os
 
-            NAA_BASE = os.getenv("NAA_BASE", "http://localhost:7073/api")
+            NAA_BASE = os.getenv("NAA_BASE", "http://localhost:7074/api")
             naa_url = f"{NAA_BASE}/worker/run/{request_id}"
             print(f"\n[TRIGGER] Calling NAA at {naa_url}")
             httpx.post(naa_url, timeout=30.0)

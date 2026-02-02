@@ -208,6 +208,7 @@ def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # === 6. TRIGGER AGGREGATION AGENT ===
         try:
             import httpx
+
             AA_BASE = os.getenv("AA_BASE", "http://localhost:7074/api")
             aa_url = f"{AA_BASE}/aa/run/{request_id}"
             logging.info(f"[TRIGGER] Calling AA at {aa_url}")

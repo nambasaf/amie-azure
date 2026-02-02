@@ -8,12 +8,14 @@ and persists the final report back to the table with status 'completed'.
 """
 
 import azure.functions as func
+import datetime
+import json
 import logging
 import os
-import sys
-import json
 import pathlib
+import sys
 from azure.data.tables import TableServiceClient
+from azure.storage.blob import BlobServiceClient
 
 # Ensure project root is on path so `backend` package is importable
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -25,8 +27,23 @@ from backend.aa.aa import run_aggregation_agent
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 # Storage configuration
-STORAGE = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
+STORAGE = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv(
+    "AzureWebJobsStorage"
+)
 TABLE_NAME = "IngestionRequests"
+CONTAINER_NAME = "manuscript-uploads"
+
+
+def _get_naa_output_str(entity) -> str:
+    """Resolve NAA output from table property or from blob if too large."""
+    blob_path = entity.get("naa_output_blob")
+    if blob_path:
+        blob_service = BlobServiceClient.from_connection_string(STORAGE)
+        container = blob_service.get_container_client(CONTAINER_NAME)
+        blob_client = container.get_blob_client(blob_path)
+        data = blob_client.download_blob().readall()
+        return data.decode("utf-8")
+    return entity.get("naa_output", "{}") or "{}"
 
 
 @app.route(route="aa/run/{request_id}", methods=["POST"])
@@ -56,8 +73,8 @@ def run_aa(req: func.HttpRequest) -> func.HttpResponse:
         except:
             idca_output = {}
 
-        # Parse NAA output (if present)
-        naa_output_str = entity.get("naa_output", "{}")
+        # Parse NAA output (from table or blob if stored there due to size)
+        naa_output_str = _get_naa_output_str(entity)
         try:
             naa_output_dict = json.loads(naa_output_str) if naa_output_str else {}
         except:
@@ -85,6 +102,7 @@ def run_aa(req: func.HttpRequest) -> func.HttpResponse:
 
         # Update status to completed
         entity["status"] = "completed"
+        entity["completed_at"] = datetime.datetime.utcnow().isoformat()
         entity["aa_output"] = final_report
         table.update_entity(entity)
 

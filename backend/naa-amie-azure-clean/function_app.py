@@ -16,7 +16,6 @@ if str(REPO_ROOT) not in sys.path:
 from backend.naa_brain_MVP.naa_test import run_steps_8_to_12
 from backend.naa_brain_MVP.rm_retrieval import download_and_store_rms
 from backend.naa_brain_MVP.rm_assessment import assess_all_rms
-from backend.aa import run_aggregation_agent
 from prior_art_open import search_prior_art
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
@@ -28,9 +27,13 @@ INGESTION_TABLE = "IngestionRequests"
 
 # === LAZY STORAGE CLIENT HELPER ===
 def get_storage_clients():
-    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
+    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv(
+        "AzureWebJobsStorage"
+    )
     if not conn_str:
-        raise ValueError("Missing storage connection string (AZURE_STORAGE_CONNECTION_STRING or AzureWebJobsStorage)")
+        raise ValueError(
+            "Missing storage connection string (AZURE_STORAGE_CONNECTION_STRING or AzureWebJobsStorage)"
+        )
 
     # Import here to keep top-level light
     from azure.storage.blob import BlobServiceClient
@@ -87,8 +90,10 @@ def start_assessment(req: func.HttpRequest) -> func.HttpResponse:
         if entity.get("status") != "classified":
             return func.HttpResponse("IDCA must complete first", status_code=400)
 
-        entity["status"] = "analyzing"
-        ing_table.update_entity(entity)
+        ing_table.update_entity(
+            {"PartitionKey": "AMIE", "RowKey": request_id, "status": "analyzing"},
+            mode="merge",
+        )
 
         return func.HttpResponse(
             json.dumps({"request_id": request_id, "message": "NAA started"}),
@@ -167,9 +172,11 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         if entity.get("status") not in ("classified", "analyzing"):
             return func.HttpResponse("IDCA not completed", status_code=400)
 
-        # Set status to analyzing at start
-        entity["status"] = "analyzing"
-        ing_table.update_entity(entity)
+        # Set status to analyzing (merge so we don't re-send large idca_output)
+        ing_table.update_entity(
+            {"PartitionKey": "AMIE", "RowKey": request_id, "status": "analyzing"},
+            mode="merge",
+        )
 
         filename = entity["filename"]
         idca_output = json.loads(entity.get("idca_output", "{}"))
@@ -184,24 +191,26 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # ------------------------------------------------------------------
         # 2. Retrieve Reference Manuscripts (Step 13)
         # ------------------------------------------------------------------
+        stored_blob_names = []
         try:
-            # Fix: Await directly
-            await download_and_store_rms(request_id, naa_outputs.lor, blob_service)
+            stored_blob_names = await download_and_store_rms(
+                request_id, naa_outputs.lor, blob_service
+            )
         except Exception as e:
             logging.warning(f"RM retrieval failed: {e}")
 
         # ------------------------------------------------------------------
-        # 3. Assess RMs (Steps 14-17)
+        # 3. Assess RMs (Steps 14-17) — use stored_blob_names order = search order (best first)
         # ------------------------------------------------------------------
         assessments = None
         try:
             if naa_outputs.lor:
-                # Fix: Await directly
                 assessments = await assess_all_rms(
                     request_id,
                     blob_service,
                     naa_outputs.ssr,
                     naa_outputs.ss_synopsis,
+                    ordered_blob_names=stored_blob_names,
                 )
         except Exception as e:
             logging.warning(f"RM assessment failed: {e}")
@@ -218,45 +227,60 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
             naa_output_json["assessments"] = [a.__dict__ for a in assessments]
 
         # ------------------------------------------------------------------
-        # 5. Persist NAA results to Table Storage
+        # 5. Persist NAA results (Table Storage: max 32K chars per property — use blob if larger)
         # ------------------------------------------------------------------
-        entity.update(
-            {
+        naa_output_str = json.dumps(naa_output_json)
+        max_table_chars = 32 * 1024 - 256  # Azure limit 32K chars; leave margin
+
+        if len(naa_output_str) > max_table_chars:
+            blob_path = f"naa-outputs/{request_id}.json"
+            blob_client = container_client.get_blob_client(blob_path)
+            blob_client.upload_blob(naa_output_str.encode("utf-8"), overwrite=True)
+            patch = {
+                "PartitionKey": "AMIE",
+                "RowKey": request_id,
                 "status": "assessed",
-                "naa_output": json.dumps(naa_output_json),
+                "naa_output_blob": blob_path,
             }
-        )
-        ing_table.update_entity(entity)
-        logging.info(f"NAA completed for {request_id}, starting Aggregation Agent...")
+            logging.info(f"NAA output stored in blob ({len(naa_output_str)} chars): {blob_path}")
+        else:
+            patch = {
+                "PartitionKey": "AMIE",
+                "RowKey": request_id,
+                "status": "assessed",
+                "naa_output": naa_output_str,
+            }
+        ing_table.update_entity(patch, mode="merge")
+        logging.info(f"NAA completed for {request_id}, triggering Aggregation Agent...")
 
         # ------------------------------------------------------------------
-        # 6. Run Aggregation Agent (SSOW Steps 18-19)
+        # 6. Call AA function app (SSOW Steps 18-19)
         # ------------------------------------------------------------------
         try:
-            final_report = run_aggregation_agent(
-                idca_output=idca_output,
-                naa_output=naa_outputs,
-                naa_assessments=assessments,
-                request_id=request_id,
-                table=ing_table,
-            )
+            import httpx
+
+            aa_base = os.getenv("AA_BASE", "http://localhost:7070/api").rstrip("/")
+            key = os.getenv("AA_FUNCTION_KEY", "")
+            url = f"{aa_base}/aa/run/{request_id}"
+            if key:
+                url = f"{url}?code={key}"
+            r = httpx.post(url, timeout=120.0)
+            r.raise_for_status()
             logging.info(f"Aggregation Agent completed for {request_id}")
-
-            # Update status to completed after AA finishes
-            entity = ing_table.get_entity("AMIE", request_id)
-            entity["status"] = "completed"
-            entity["completed_at"] = datetime.datetime.utcnow().isoformat()
-            ing_table.update_entity(entity)
-
         except Exception as aa_error:
             logging.error(f"Aggregation Agent failed for {request_id}: {aa_error}")
-            # Still mark as assessed even if AA fails
-            entity = ing_table.get_entity("AMIE", request_id)
-            entity["status"] = "assessed"
-            entity["aa_error"] = str(aa_error)
-            ing_table.update_entity(entity)
+            # Still mark as assessed even if AA fails (merge so we don't re-send large props)
+            ing_table.update_entity(
+                {
+                    "PartitionKey": "AMIE",
+                    "RowKey": request_id,
+                    "status": "assessed",
+                    "aa_error": str(aa_error),
+                },
+                mode="merge",
+            )
 
-        return func.HttpResponse("NAA and AA assessment complete", status_code=200)
+        return func.HttpResponse("NAA complete; AA triggered", status_code=200)
     # --- end of function ---
 
     except Exception as exc:
@@ -264,10 +288,15 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         try:
             _, _, table_service = get_storage_clients()
             ing_table = table_service.get_table_client(INGESTION_TABLE)
-            entity = ing_table.get_entity("AMIE", request_id)
-            entity["status"] = "failed"
-            entity["error"] = str(exc)
-            ing_table.update_entity(entity)
+            ing_table.update_entity(
+                {
+                    "PartitionKey": "AMIE",
+                    "RowKey": request_id,
+                    "status": "failed",
+                    "error": str(exc)[:32000],  # table property max 32K chars
+                },
+                mode="merge",
+            )
         except Exception:
             pass
 
