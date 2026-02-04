@@ -218,10 +218,29 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # ------------------------------------------------------------------
         # 4. Assemble NAA output JSON
         # ------------------------------------------------------------------
+        
+        # [NEW] Filter 'lor' to only include items that were successfully assessed
+        # We assume stored_blob_names order matches naa_outputs.lor order (since both come from download_and_store_rms/asyncio.gather)
+        filtered_lor = []
+        if assessments and stored_blob_names:
+            assessed_filenames = {a.filename for a in assessments}
+            
+            # stored_blob_names[i] corresponds to naa_outputs.lor[i]
+            # We iterate through them in parallel
+            if len(stored_blob_names) == len(naa_outputs.lor):
+                 for i, ref in enumerate(naa_outputs.lor):
+                     blob_name = stored_blob_names[i]
+                     if blob_name in assessed_filenames:
+                         filtered_lor.append(ref)
+            else:
+                logging.warning(f"Length mismatch: {len(stored_blob_names)} blobs vs {len(naa_outputs.lor)} refs. Skipping strict filtering.")
+                filtered_lor = naa_outputs.lor # Fallback to everything
+
         naa_output_json = {
             "ss_synopsis": naa_outputs.ss_synopsis,
             "ucs": naa_outputs.ucs,
-            "lor": naa_outputs.lor,
+            "lor": filtered_lor, # <--- FILTERED
+            "source_citation": idca_output.get("source_citation", "Unknown"), # <--- PRESERVED FROM IDCA
         }
         if assessments:
             naa_output_json["assessments"] = [a.__dict__ for a in assessments]
@@ -259,7 +278,7 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         try:
             import httpx
 
-            aa_base = os.getenv("AA_BASE", "http://localhost:7070/api").rstrip("/")
+            aa_base = os.getenv("AA_BASE", "http://localhost:7074/api").rstrip("/")
             key = os.getenv("AA_FUNCTION_KEY", "")
             url = f"{aa_base}/aa/run/{request_id}"
             if key:

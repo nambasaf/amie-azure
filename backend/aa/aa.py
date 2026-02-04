@@ -88,13 +88,13 @@ def build_prompt(
 ) -> str:
     """Returns the final prompt string to feed to the Aggregation Agent."""
     citation = idca_output.get("source_citation", "Unknown Citation")
-    status = idca_output.get("status_determination")
+    status = (idca_output.get("status_determination") or "").strip().lower()
     justification = idca_output.get("justification", "")
 
     ss_synopsis = getattr(naa_output, "ss_synopsis", "Not available")
 
     # ---------------- CASE A – No Invention Present ----------------
-    if status != "Present":
+    if status != "present":
         return f"""
 IDCA Output:
 Status: {status}
@@ -111,19 +111,30 @@ Please produce the 'No Invention Present' final report.
 
     # ------------ Deep-analysis path (assessments present) --------
     if naa_assessments:
+        # Helper to handle both object (attribute) and dict (item) access
+        def get_val(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
         sorted_assess = sorted(
-            naa_assessments, key=lambda a: a.sos_score["ewss"], reverse=True
+            naa_assessments, 
+            key=lambda a: get_val(a, "sos_score", {}).get("ewss", 0), 
+            reverse=True
         )
         frt_md = "| Citation | RS Synopsis | CSS | EWSS |\n|---|---|---|---|\n"
         for a in sorted_assess:
-            css = a.sos_score.get("css", 0)
-            ewss = a.sos_score.get("ewss", 0)
+            score = get_val(a, "sos_score", {})
+            css = score.get("css", 0)
+            ewss = score.get("ewss", 0)
+            
+            raw_cit = get_val(a, "reference_citation", "Unknown")
             cit = (
-                a.reference_citation.replace("\n", " ")[:100] + "..."
-                if len(a.reference_citation) > 100
-                else a.reference_citation
+                raw_cit.replace("\n", " ")[:100] + "..."
+                if len(raw_cit) > 100
+                else raw_cit
             )
-            syn = a.rs_synopsis.replace("\n", " ")
+            syn = get_val(a, "rs_synopsis", "Not available").replace("\n", " ")
             frt_md += f"| {cit} | {syn} | {css} | {ewss} |\n"
 
         return f"""
@@ -133,7 +144,14 @@ INSTRUCTIONS FOR FINAL REPORT:
 1. You are the Aggregation Agent (AA).
 2. Display the Final Reference Table (FRT) exactly as provided below.
 3. Keep the Context Header above the table.
-4. Do NOT add any extra sections beyond the FRT.
+4. AFTER the table, you MUST include a section titled "**Novelty Verdict**".
+5. The Novelty Verdict MUST be one of:
+   - NOVEL
+   - NOT NOVEL
+   - INCONCLUSIVE
+6. Do NOT use hedging language ("may", "appears", "potentially") in the verdict line.
+7. After the verdict line, include a short **Rationale** (2–4 sentences) that
+   justifies the verdict using CSS/EWSS comparisons.
 
 DATA TO DISPLAY:\n\n{frt_md}
 """
@@ -188,6 +206,9 @@ def run_aggregation_agent(
     table=None,
 ) -> str:
     """Executes AA prompt with retries and persists to Table if provided."""
+
+    if naa_assessments is None:
+        raise ValueError("AA called with naa_assessments=None — invalid pipeline state")
 
     prompt = build_prompt(idca_output, naa_output, naa_assessments)
 

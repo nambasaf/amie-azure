@@ -23,18 +23,15 @@ TABLE_NAME = "IngestionRequests"
 
 STORAGE_ACCOUNT_NAME = os.getenv("STORAGE_ACCOUNT_NAME")
 
-
 def get_queue_client():
-    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv(
-        "AzureWebJobsStorage"
-    )
+    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
     if not conn_str:
         raise RuntimeError("No storage connection string found")
 
     queue_client = QueueClient.from_connection_string(
         conn_str,
         queue_name="idca-queue",
-        message_encode_policy=TextBase64EncodePolicy(),
+        message_encode_policy=TextBase64EncodePolicy()
     )
 
     # Create queue if it doesn't exist
@@ -47,29 +44,20 @@ def get_queue_client():
 
 
 def get_blob_service():
-    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv(
-        "AzureWebJobsStorage"
-    )
+    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
     if conn_str:
         return BlobServiceClient.from_connection_string(conn_str)
-
+        
     if not STORAGE_ACCOUNT_NAME:
-        raise RuntimeError(
-            "Neither AZURE_STORAGE_CONNECTION_STRING nor STORAGE_ACCOUNT_NAME is set"
-        )
+        raise RuntimeError("Neither AZURE_STORAGE_CONNECTION_STRING nor STORAGE_ACCOUNT_NAME is set")
 
     return BlobServiceClient(
         account_url=f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net",
         credential=DefaultAzureCredential(),
     )
 
-
 def get_table_service():
-    conn_str = (
-        os.getenv("TABLE_CONNECTION_STRING")
-        or os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-        or os.getenv("AzureWebJobsStorage")
-    )
+    conn_str = os.getenv("TABLE_CONNECTION_STRING") or os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
     if conn_str:
         return TableServiceClient.from_connection_string(conn_str)
 
@@ -81,13 +69,12 @@ def get_table_service():
         credential=DefaultAzureCredential(),
     )
 
-
 def get_table_client():
     service = get_table_service()
     service.create_table_if_not_exists(TABLE_NAME)
     return service.get_table_client(TABLE_NAME)
 
-
+    
 @app.route(route="upload", methods=["POST"])
 def upload(req: func.HttpRequest) -> func.HttpResponse:
     """
@@ -105,12 +92,7 @@ def upload(req: func.HttpRequest) -> func.HttpResponse:
         # Upload file to Blob Storage
         blob_service = get_blob_service()
         container_client = blob_service.get_container_client(CONTAINER_NAME)
-        # Create container if it doesn't exist
-        try:
-            container_client.create_container()
-        except ResourceExistsError:
-            pass  # Container already exists, safe to ignore
-        blob_client = container_client.get_blob_client(uploaded_file.filename)
+        blob_client = container_client.get_blob_client(uploaded_file.filename)  
         blob_client.upload_blob(uploaded_file.stream.read(), overwrite=True)
 
         # Create ingestion record
@@ -123,8 +105,6 @@ def upload(req: func.HttpRequest) -> func.HttpResponse:
         }
 
         table_service = get_table_service()
-        # Create table if it doesn't exist
-        table_service.create_table_if_not_exists(TABLE_NAME)
         table_client = table_service.get_table_client(TABLE_NAME)
         table_client.create_entity(entity=entity)
 
@@ -160,6 +140,7 @@ def upload(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Internal server error", status_code=500)
 
 
+
 # GET /requests
 
 
@@ -169,38 +150,51 @@ def list_requests(req: func.HttpRequest) -> func.HttpResponse:
     table_client = get_table_client()
     entities = list(table_client.list_entities())
     results = [
-        {
-            "request_id": e.get("RowKey"),
-            "filename": e.get("filename", None),
-            "status": e.get("status", "unknown"),
-            "uploaded_at": e.get("uploaded_at"),
-        }
-        for e in entities
-    ]
+    {
+        "request_id": e.get("RowKey"),
+        "filename": e.get("filename", None),
+        "status": e.get("status", "unknown"),
+        "uploaded_at": e.get("uploaded_at"),
+    }
+    for e in entities
+]
 
     return func.HttpResponse(json.dumps(results, indent=2), mimetype="application/json")
 
 
 def _entity_to_response_dict(entity, blob_service=None):
-    """Build a JSON-serializable dict from a table entity; resolve naa_output from blob if stored there."""
+    """Build a JSON-serializable dict from a table entity; resolve blobs if stored there."""
     result = dict(entity)
-    blob_path = result.get("naa_output_blob")
-    if blob_path and blob_service:
+
+    # Resolve NAA output
+    if result.get("naa_output_blob") and blob_service:
         try:
             container = blob_service.get_container_client(CONTAINER_NAME)
-            blob_client = container.get_blob_client(blob_path)
+            blob_client = container.get_blob_client(result["naa_output_blob"])
             data = blob_client.download_blob().readall()
             result["naa_output"] = data.decode("utf-8")
         except Exception as e:
-            logging.warning(f"Could not load naa_output from blob {blob_path}: {e}")
+            logging.warning(f"Could not load naa_output from blob: {e}")
         result.pop("naa_output_blob", None)
+
+    # Resolve AA output
+    if result.get("aa_output_blob") and blob_service:
+        try:
+            container = blob_service.get_container_client(CONTAINER_NAME)
+            blob_client = container.get_blob_client(result["aa_output_blob"])
+            data = blob_client.download_blob().readall()
+            result["aa_output"] = data.decode("utf-8")
+        except Exception as e:
+            logging.warning(f"Could not load aa_output from blob: {e}")
+        result.pop("aa_output_blob", None)
+
     return result
 
 
 # GET /requests/{request_id}
 @app.route(route="requests/{request_id}", methods=["GET"])
 def get_request(req: func.HttpRequest) -> func.HttpResponse:
-    """Retrieve one ingestion record (naa_output resolved from blob if stored there)."""
+    """Retrieve one ingestion record."""
     request_id = req.route_params.get("request_id")
     table_service = get_table_service()
     table_client = table_service.get_table_client(TABLE_NAME)
@@ -348,7 +342,7 @@ def get_text(req: func.HttpRequest) -> func.HttpResponse:
     """Return extracted text of the manuscript."""
     request_id = req.route_params.get("request_id")
     table_service = get_table_service()
-    table_client = table_service.get_table_client(TABLE_NAME)
+    table_client = table_service.get_table_client(TABLE_NAME)   
 
     try:
         # 1. Get metadata from table

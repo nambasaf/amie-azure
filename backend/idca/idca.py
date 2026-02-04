@@ -1,5 +1,9 @@
 import os
 import sys
+import io
+
+# Force stdout to be UTF-8 to prevent crashes on Windows consoles
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 # Ensure backend root directory is on import path
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -181,7 +185,7 @@ def get_manuscript_text(request_id: str) -> str:
 
     if not text or len(text) < 100:
         print(" PyPDF2 returned very little text — this PDF may be scanned.")
-        print("→ If so, we will need to switch to pdfminer or OCR.")
+        print("-> If so, we will need to switch to pdfminer or OCR.")
 
     return text
 
