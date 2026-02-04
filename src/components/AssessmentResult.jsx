@@ -290,7 +290,7 @@ function AssessmentResult({ fullResult, filename }) {
               '& p': { mb: 1 },
             }}
           >
-            {parsed.aaReport || 'No report available.'}
+            {parsed.aaReport || (parsed.status === 'assessed' ? 'Aggregation Agent is compiling the final report...' : 'No report available.')}
           </Typography>
         </AccordionDetails>
       </Accordion>
