@@ -17,12 +17,7 @@ import sys
 from azure.data.tables import TableServiceClient
 from azure.storage.blob import BlobServiceClient
 
-# Ensure project root is on path so `backend` package is importable
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.append(str(ROOT))
-
-from backend.aa.aa import run_aggregation_agent
+from aa import run_aggregation_agent
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 

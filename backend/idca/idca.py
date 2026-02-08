@@ -22,8 +22,13 @@ from azure.data.tables import TableServiceClient
 from azure.ai.agents.models import MessageRole
 from PyPDF2 import PdfReader
 import tempfile
-from backend.aa.aa import run_aggregation_agent
-from backend.utils.retry import retry_agent
+try:
+    from backend.aa.aa import run_aggregation_agent
+    from backend.aa.retry import retry_agent
+except ImportError:
+    # If running in a context where "backend" isn't a package (unlikely here but good for robustness)
+    from aa import run_aggregation_agent
+    from retry import retry_agent
 
 
 # Load .env variables

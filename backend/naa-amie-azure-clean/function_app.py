@@ -8,14 +8,9 @@ import io
 import asyncio
 import sys, pathlib
 
-# Ensure repository root is on path for backend.aa and backend.naa_brain_MVP imports
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]  # Go up to repo root
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from backend.naa_brain_MVP.naa_test import run_steps_8_to_12
-from backend.naa_brain_MVP.rm_retrieval import download_and_store_rms
-from backend.naa_brain_MVP.rm_assessment import assess_all_rms
+from naa_test import run_steps_8_to_12
+from rm_retrieval import download_and_store_rms
+from rm_assessment import assess_all_rms
 from prior_art_open import search_prior_art
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)

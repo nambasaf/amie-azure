@@ -8,47 +8,48 @@ from dotenv import load_dotenv
 from azure.ai.agents import AgentsClient
 from azure.ai.agents.models import MessageRole
 from azure.identity import DefaultAzureCredential
-# from naa_brain_MVP.search.prior_art_search import progressive_search  <-- Removed
 
 # ---------------------------------------------------------------------
-# LOAD ENVIRONMENT
+# LAZY AZURE CLIENT & ENV VALIDATION
 # ---------------------------------------------------------------------
-load_dotenv()
+_agents_client = None
 
-PROJECT_ENDPOINT = os.getenv("PROJECT_ENDPOINT")
+def get_agents_client():
+    global _agents_client
+    if _agents_client is not None:
+        return _agents_client
 
-# Agent IDs for each step (must exist in your project)
+    load_dotenv()
+    
+    endpoint = os.getenv("PROJECT_ENDPOINT")
+    if not endpoint:
+        # In Azure, these should be set in App Settings
+        raise ValueError("Environment variable 'PROJECT_ENDPOINT' is missing. Please set it in Azure App Settings or .env")
+
+    from azure.identity import DefaultAzureCredential
+    from azure.ai.agents import AgentsClient
+
+    _agents_client = AgentsClient(
+        endpoint=endpoint,
+        credential=DefaultAzureCredential(
+            exclude_environment_credential=True,
+            exclude_managed_identity_credential=True,
+        ),
+    )
+    return _agents_client
+
+
+def get_agent_id(var_name: str) -> str:
+    agent_id = os.getenv(var_name)
+    if not agent_id:
+        raise ValueError(f"Environment variable '{var_name}' is missing. Please set it in Azure App Settings or .env")
+    return agent_id
+
+# Backward compatibility for modules that import these at top-level
 SS_AGENT_ID = os.getenv("SS_Agent_ID")
 SSR_AGENT_ID = os.getenv("SSR_Agent_ID")
 SS_SYNOPSIS_AGENT_ID = os.getenv("SS_Synopsis_Agent_ID")
 UCS_BUILDER_AGENT_ID = os.getenv("UCS_Builder_Agent_ID")
-
-if not PROJECT_ENDPOINT:
-    raise ValueError("PROJECT_ENDPOINT must be set in .env")
-
-missing_ids = []
-if not SS_AGENT_ID:
-    missing_ids.append("SS_Agent_ID")
-if not SSR_AGENT_ID:
-    missing_ids.append("SSR_Agent_ID")
-if not SS_SYNOPSIS_AGENT_ID:
-    missing_ids.append("SS_Synopsis_Agent_ID")
-if not UCS_BUILDER_AGENT_ID:
-    missing_ids.append("UCS_Builder_Agent_ID")
-
-if missing_ids:
-    raise ValueError(f"Missing agent IDs in .env: {', '.join(missing_ids)}")
-
-# ---------------------------------------------------------------------
-# AZURE CLIENT
-# ---------------------------------------------------------------------
-agents_client = AgentsClient(
-    endpoint=PROJECT_ENDPOINT,
-    credential=DefaultAzureCredential(
-        exclude_environment_credential=True,
-        exclude_managed_identity_credential=True,
-    ),
-)
 
 
 # ---------------------------------------------------------------------
@@ -63,24 +64,27 @@ def _chat(agent_id: str, prompt: str) -> str:
     - Runs the agent
     - Returns the final assistant reply text (stripped)
     """
+    # 1. Get client and validate environment lazily
+    client = get_agents_client()
+
     # 1. Create thread
-    thread = agents_client.threads.create()
+    thread = client.threads.create()
 
     # 2. Send user message
-    agents_client.messages.create(
+    client.messages.create(
         thread_id=thread.id,
         role=MessageRole.USER,  # only user/assistant are allowed
         content=prompt,
     )
 
     # 3. Run agent
-    _ = agents_client.runs.create_and_process(
+    _ = client.runs.create_and_process(
         thread_id=thread.id,
         agent_id=agent_id,
     )
 
     # 4. Collect assistant response
-    msgs = list(agents_client.messages.list(thread_id=thread.id))
+    msgs = list(client.messages.list(thread_id=thread.id))
     for msg in reversed(msgs):
         if msg.role == "assistant" and msg.text_messages:
             text = msg.text_messages[-1].text.value.strip()
@@ -106,7 +110,7 @@ def _chat(agent_id: str, prompt: str) -> str:
     raise RuntimeError(f"No assistant output returned for agent {agent_id}.")
 
 
-from backend.utils.retry import retry_agent
+from retry import retry_agent
 
 
 # ---------------------------------------------------------------------
@@ -151,7 +155,7 @@ class NAAOutputs:
 # ---------------------------------------------------------------------
 # STEP 8 — SOURCE STRUCTURE (SS)
 # ---------------------------------------------------------------------
-def build_source_structure(manuscript_text: str, idca_output: str) -> SourceStructure:
+def build_source_structure(manuscript_text: str, idca_output: str, agent_id: str) -> SourceStructure:
     prompt = f"""
 Decompose the Source Technology into elemental structural blocks.
 
@@ -183,7 +187,7 @@ IDCA Output:
 {idca_output}
 """
 
-    raw = _chat(SS_AGENT_ID, prompt)
+    raw = _chat(agent_id, prompt)
 
     try:
         data = json.loads(raw)
@@ -215,7 +219,7 @@ IDCA Output:
 # ---------------------------------------------------------------------
 # STEP 9 — STRUCTURAL SCORING RUBRIC (SSR)
 # ---------------------------------------------------------------------
-def build_ssr(ss: SourceStructure) -> StructuralScoringRubric:
+def build_ssr(ss: SourceStructure, agent_id: str) -> StructuralScoringRubric:
     summary = "\n".join(f"- {b.block_name}: {b.function}" for b in ss.blocks)
 
     prompt = f"""
@@ -255,7 +259,7 @@ Source Structure:
 {summary}
 """
 
-    raw = _chat(SSR_AGENT_ID, prompt)
+    raw = _chat(agent_id, prompt)
 
     try:
         data = json.loads(raw)
@@ -302,7 +306,7 @@ def render_ssr_table(ssr: StructuralScoringRubric) -> str:
 # ---------------------------------------------------------------------
 # STEP 10 — SS SYNOPSIS (ONE SENTENCE)
 # ---------------------------------------------------------------------
-def ss_synopsis(ss: SourceStructure) -> str:
+def ss_synopsis(ss: SourceStructure, agent_id: str) -> str:
     summary = "\n".join(f"- {b.block_name}: {b.function}" for b in ss.blocks)
 
     prompt = f"""
@@ -320,14 +324,14 @@ SS Blocks:
 Return ONLY the sentence.
 """
 
-    out = _chat(SS_SYNOPSIS_AGENT_ID, prompt)
+    out = _chat(agent_id, prompt)
     return out.strip()
 
 
 # ---------------------------------------------------------------------
 # STEP 11 — UNIFIED COMPOSITE SEARCH STRING (UCS)
 # ---------------------------------------------------------------------
-def build_ucs(ss: SourceStructure) -> str:
+def build_ucs(ss: SourceStructure, agent_id: str) -> str:
     summary = "\n".join(f"- {b.block_name}: {b.function}" for b in ss.blocks)
 
     prompt = f"""
@@ -356,7 +360,7 @@ SS Blocks:
 Return ONLY the UCS string.
 """
 
-    ucs = _chat(UCS_BUILDER_AGENT_ID, prompt)
+    ucs = _chat(agent_id, prompt)
     # normalize whitespace
     return " ".join(ucs.split())
 
@@ -372,8 +376,9 @@ async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutput
 
     # -------------------- STEP 8 --------------------
     logging.info("\n===== SOURCE STRUCTURE (SS) =====")
+    ss_id = get_agent_id("SS_Agent_ID")
     ss = retry_agent(
-        lambda: build_source_structure(manuscript_text, idca_output), "SS Agent"
+        lambda: build_source_structure(manuscript_text, idca_output, ss_id), "SS Agent"
     )
     logging.info(" [SS AGENT OUTPUT]")
     for blk in ss.blocks:
@@ -382,7 +387,8 @@ async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutput
 
     # -------------------- STEP 9 --------------------
     logging.info("\n [SSR AGENT] Building Structural Scoring Rubric...")
-    ssr = retry_agent(lambda: build_ssr(ss), "SSR Agent")
+    ssr_id = get_agent_id("SSR_Agent_ID")
+    ssr = retry_agent(lambda: build_ssr(ss, ssr_id), "SSR Agent")
     logging.info("[SSR AGENT OUTPUT]")
     for item in ssr.items:
         logging.info(f"  {item}")
@@ -394,14 +400,16 @@ async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutput
 
     # -------------------- STEP 10 --------------------
     logging.info("\n[SS SYNOPSIS AGENT] Creating Source Structure Synopsis...")
-    synopsis = retry_agent(lambda: ss_synopsis(ss), "SS Synopsis Agent")
+    synopsis_id = get_agent_id("SS_Synopsis_Agent_ID")
+    synopsis = retry_agent(lambda: ss_synopsis(ss, synopsis_id), "SS Synopsis Agent")
     logging.info(" [SS SYNOPSIS OUTPUT]")
     logging.info(f"  {synopsis}")
     logging.info("\n")
 
     # -------------------- STEP 11 --------------------
     logging.info("\n [UCS AGENT] Generating Unified Composite Search String...")
-    ucs = retry_agent(lambda: build_ucs(ss), "UCS Agent")
+    ucs_id = get_agent_id("UCS_Builder_Agent_ID")
+    ucs = retry_agent(lambda: build_ucs(ss, ucs_id), "UCS Agent")
     logging.info("[UCS OUTPUT]")
     logging.info(f"  {ucs}")
     logging.info("\n")
@@ -421,7 +429,7 @@ async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutput
             search_query = "prior art"  # last resort
             logging.warning("UCS and fallback empty — using minimal query 'prior art'")
 
-    from backend.naa_brain_MVP.search.search_orchestrator import (
+    from search_orchestrator import (
         progressive_search as parallel_progressive_search,
     )
 

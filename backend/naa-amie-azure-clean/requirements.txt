@@ -5,4 +5,6 @@ pypdf
 requests
 httpx
 tqdm
-pypdf
+python-dotenv
+azure-ai-agents
+azure-identity

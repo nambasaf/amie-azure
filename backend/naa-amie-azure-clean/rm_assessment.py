@@ -5,10 +5,10 @@ import logging
 import asyncio
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 from azure.storage.blob import BlobServiceClient
-from backend.naa_brain_MVP.rm_retrieval import get_container_name
-from backend.naa_brain_MVP.naa_test import (
+from rm_retrieval import get_container_name
+from naa_test import (
     _chat,
     SSR_AGENT_ID,
     render_ssr_table,

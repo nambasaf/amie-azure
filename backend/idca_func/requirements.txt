@@ -1,0 +1,7 @@
+azure-ai-agents
+azure-identity
+azure-storage-blob
+azure-data-tables
+PyPDF2
+httpx
+python-dotenv

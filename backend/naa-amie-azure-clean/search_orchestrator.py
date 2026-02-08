@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from typing import List, Tuple
-from backend.naa_brain_MVP.search.prior_art_search import search_openalex
+from prior_art_search import search_openalex
 
 
 async def search_all_sources(query: str) -> List[dict]:
@@ -19,10 +19,8 @@ async def search_all_sources(query: str) -> List[dict]:
     logging.info(f"Searching all sources for: {query[:50]}...")
 
     # Import search functions
-    from backend.naa_brain_MVP.search.prior_art_search import (
-        search_patentsview,
-        search_semantic_scholar,
-    )
+    from prior_art_search import search_patentsview
+    from prior_art_search import search_semantic_scholar
 
     # Dispatch to all engines in parallel
     tasks = [

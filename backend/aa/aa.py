@@ -23,31 +23,47 @@ from azure.ai.agents import AgentsClient
 from azure.ai.agents.models import MessageRole
 from azure.identity import DefaultAzureCredential
 
-from backend.utils.retry import retry_agent
+try:
+    from retry import retry_agent
+except ImportError:
+    # If imported from within the backend package (e.g. by idca.py)
+    from backend.aa.retry import retry_agent
 
 # ------------------------------------------------------------------
-# ENVIRONMENT
+# LAZY AZURE CLIENT & ENV VALIDATION
 # ------------------------------------------------------------------
-load_dotenv()
+_agents_client = None
 
-PROJECT_ENDPOINT = os.getenv("PROJECT_ENDPOINT")
-AGGREGATION_AGENT_ID = os.getenv("AGGREGATION_AGENT_ID")
+def get_agents_client():
+    global _agents_client
+    if _agents_client is not None:
+        return _agents_client
 
-if not PROJECT_ENDPOINT:
-    raise ValueError("PROJECT_ENDPOINT missing in environment")
-if not AGGREGATION_AGENT_ID:
-    raise ValueError("AGGREGATION_AGENT_ID missing in environment")
+    load_dotenv()
+    
+    endpoint = os.getenv("PROJECT_ENDPOINT")
+    if not endpoint:
+        # In Azure, these should be set in App Settings
+        raise ValueError("Environment variable 'PROJECT_ENDPOINT' is missing. Please set it in Azure App Settings or .env")
 
-# ------------------------------------------------------------------
-# AZURE CLIENT
-# ------------------------------------------------------------------
-agents_client = AgentsClient(
-    endpoint=PROJECT_ENDPOINT,
-    credential=DefaultAzureCredential(
-        exclude_environment_credential=True,
-        exclude_managed_identity_credential=True,
-    ),
-)
+    from azure.ai.agents import AgentsClient
+
+    _agents_client = AgentsClient(
+        endpoint=endpoint,
+        credential=DefaultAzureCredential(
+            exclude_environment_credential=True,
+            exclude_managed_identity_credential=True,
+        ),
+    )
+    return _agents_client
+
+
+def get_agent_id(var_name: str) -> str:
+    agent_id = os.getenv(var_name)
+    if not agent_id:
+        raise ValueError(f"Environment variable '{var_name}' is missing. Please set it in Azure App Settings or .env")
+    return agent_id
+
 
 # ------------------------------------------------------------------
 # HELPER – RUN AGENT ONCE
@@ -56,20 +72,23 @@ agents_client = AgentsClient(
 
 def _run_aa(prompt: str) -> str:
     """Creates a thread, sends user prompt, runs AA, returns final reply text."""
-    thread = agents_client.threads.create()
+    client = get_agents_client()
+    agent_id = get_agent_id("AGGREGATION_AGENT_ID")
+    
+    thread = client.threads.create()
 
-    agents_client.messages.create(
+    client.messages.create(
         thread_id=thread.id,
         role=MessageRole.USER,
         content=prompt,
     )
 
-    agents_client.runs.create_and_process(
+    client.runs.create_and_process(
         thread_id=thread.id,
-        agent_id=AGGREGATION_AGENT_ID,
+        agent_id=agent_id,
     )
 
-    msgs = list(agents_client.messages.list(thread_id=thread.id))
+    msgs = list(client.messages.list(thread_id=thread.id))
     for m in reversed(msgs):
         if m.role == "assistant" and m.text_messages:
             return m.text_messages[-1].text.value.strip()
