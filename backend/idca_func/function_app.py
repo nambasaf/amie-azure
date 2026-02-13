@@ -50,37 +50,17 @@ def run_idca(req: func.HttpRequest) -> func.HttpResponse:  # noqa: D401
             "Storage connection string not configured", status_code=500
         )
 
-    # Build command: python -m backend.idca.idca --request-id <id> --storage <conn>
-    cmd = [
-        PYTHON,
-        "-m",
-        "backend.idca.idca",
-        "--request-id",
-        request_id,
-        "--storage",
-        STORAGE,
-    ]
-
-    # Launch without waiting (fire-and-forget)
-    # But capture output to a log file so we can debug
+    # Directly import and run the IDCA agent
+    # This ensures the Azure Function stays alive until the job is done
     try:
-        log_file = ROOT / "idca_logs" / f"idca_{request_id}.log"
-        log_file.parent.mkdir(exist_ok=True)
-
-        with open(log_file, "w") as log:
-            process = subprocess.Popen(
-                cmd,
-                cwd=str(ROOT),
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-        logging.info(
-            f"IDCA subprocess started for {request_id} (PID: {process.pid}, log: {log_file})"
-        )
+        from idca import run_idca
+        
+        logging.info(f"Starting IDCA logic directly for {request_id}")
+        run_idca(request_id)
+        logging.info(f"IDCA logic completed for {request_id}")
     except Exception as e:
-        logging.error(f"Failed to start IDCA subprocess: {e}", exc_info=True)
-        return func.HttpResponse(f"Failed to start IDCA: {e}", status_code=500)
+        logging.error(f"IDCA logic failed for {request_id}: {e}", exc_info=True)
+        return func.HttpResponse(f"Failed to run IDCA: {e}", status_code=500)
 
     return func.HttpResponse(
         f"IDCA started for {request_id}", status_code=202, mimetype="text/plain"

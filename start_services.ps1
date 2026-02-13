@@ -37,10 +37,10 @@ Write-Host ""
 Write-Host "All services started!" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Service URLs:" -ForegroundColor Yellow
-Write-Host "  - Ingestion: http://localhost:7071/api" -ForegroundColor White
-Write-Host "  - IDCA:      http://localhost:7072/api" -ForegroundColor White
-Write-Host "  - NAA:       http://localhost:7073/api" -ForegroundColor White
-Write-Host "  - AA:        http://localhost:7074/api" -ForegroundColor White
+Write-Host "  - Ingestion:  https://amie-ingestion-fn-hyd0hkd0hzfmawep.westus2-01.azurewebsites.net/" -ForegroundColor White
+Write-Host "  - IDCA:      https://idca-func-hbergrcufpbmh2e5.westus2-01.azurewebsites.net/" -ForegroundColor White
+Write-Host "  - NAA:       https://naa-amie-dkdfggcbaghzdebr.westus2-01.azurewebsites.net/" -ForegroundColor White
+Write-Host "  - AA:        https://aa-func-habphsfdg5ejgtcy.westus2-01.azurewebsites.net/" -ForegroundColor White
 Write-Host "  - Frontend:  http://localhost:5173" -ForegroundColor White
 Write-Host ""
 Write-Host "Press any key to exit this window (services will continue running)..." -ForegroundColor Gray

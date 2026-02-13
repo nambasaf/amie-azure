@@ -27,7 +27,7 @@ def idca_queue_worker(msg: func.QueueMessage):
     logging.info(f"[IDCA QUEUE] received request_id={request_id} (will trigger standalone IDCA app)")
 
     # Call the IDCA function app; IDCA runs in that app, not in this process
-    idca_base = os.getenv("IDCA_BASE", "http://localhost:7072/api").rstrip("/")
+    idca_base = os.getenv("IDCA_BASE", "https://idca-func-hbergrcufpbmh2e5.westus2-01.azurewebsites.net/").rstrip("/")
     key = os.getenv("IDCA_FUNCTION_KEY", "")
     url = f"{idca_base}/idca/run/{request_id}"
     if key:

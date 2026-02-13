@@ -273,7 +273,7 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         try:
             import httpx
 
-            aa_base = os.getenv("AA_BASE", "http://localhost:7074/api").rstrip("/")
+            aa_base = os.getenv("AA_BASE", "https://aa-func-habphsfdg5ejgtcy.westus2-01.azurewebsites.net/").rstrip("/")
             key = os.getenv("AA_FUNCTION_KEY", "")
             url = f"{aa_base}/aa/run/{request_id}"
             if key:
