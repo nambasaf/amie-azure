@@ -1,0 +1,10 @@
+azure-functions
+azure-storage-blob
+azure-data-tables
+pypdf
+requests
+httpx
+tqdm
+python-dotenv
+azure-ai-agents
+azure-identity
