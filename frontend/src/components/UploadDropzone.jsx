@@ -148,7 +148,7 @@ export default function UploadDropzone({ onStatusChange = () => { } }) {
 
   const fetchFullResult = async (requestId) => {
     try {
-      const url = `${import.meta.env.VITE_API_BASE}/requests/${requestId}?code=${import.meta.env.VITE_API_CODE}`;
+      const url = `${import.meta.env.VITE_API_BASE}/api/requests/${requestId}?code=${import.meta.env.VITE_API_CODE}`;
       const { data } = await axios.get(url);
       setFullResult(data);
     } catch (err) {
@@ -172,7 +172,7 @@ export default function UploadDropzone({ onStatusChange = () => { } }) {
 
     const pollStatus = async () => {
       try {
-        const url = `${import.meta.env.VITE_API_BASE}/requests/${meta.request_id}/status?code=${import.meta.env.VITE_API_CODE}`;
+        const url = `${import.meta.env.VITE_API_BASE}/api/requests/${meta.request_id}/status?code=${import.meta.env.VITE_INGESTION_AGENT_FUNCTION_KEY}`;
         const { data } = await axios.get(url);
 
         // Use ref to compare - prevents infinite loops from stale closures
@@ -236,7 +236,7 @@ export default function UploadDropzone({ onStatusChange = () => { } }) {
     ]);
 
     try {
-      const apiUrl = `${import.meta.env.VITE_API_BASE}/upload?code=${import.meta.env.VITE_API_CODE}`;
+      const apiUrl = `${import.meta.env.VITE_API_BASE}/api/upload?code=${import.meta.env.VITE_API_CODE}`;
       const formData = new FormData();
       formData.append('file', file);
       const res = await axios.post(apiUrl, formData);

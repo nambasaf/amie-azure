@@ -286,9 +286,9 @@ def run_idca(request_id: str):
 
         try:
             # Trigger Aggregation Agent via HTTP
-            AA_BASE = os.getenv("AA_BASE", "https://aa-func-habphsfdg5ejgtcy.westus2-01.azurewebsites.net/").rstrip("/")
+            AA_BASE = os.getenv("AA_BASE", "https://aa-func-habphsfdg5ejgtcy.westus2-01.azurewebsites.net").rstrip("/")
             aa_key = os.getenv("AA_FUNCTION_KEY", "")
-            aa_url = f"{AA_BASE}/aa/run/{request_id}"
+            aa_url = f"{AA_BASE}/api/aa/run/{request_id}"
             if aa_key:
                 aa_url = f"{aa_url}?code={aa_key}"
             
@@ -316,8 +316,11 @@ def run_idca(request_id: str):
     # -------------------------------
     if idca_json.get("status_determination") == "Present":
         try:
-            NAA_BASE = os.getenv("NAA_BASE", "https://naa-amie-dkdfggcbaghzdebr.westus2-01.azurewebsites.net/")
-            naa_url = f"{NAA_BASE}/worker/run/{request_id}"
+            NAA_BASE = os.getenv("NAA_BASE", "https://naa-amie-dkdfggcbaghzdebr.westus2-01.azurewebsites.net").rstrip("/")
+            naa_key = os.getenv("NAA_FUNCTION_KEY", "")
+            naa_url = f"{NAA_BASE}/api/worker/run/{request_id}"
+            if naa_key:
+                naa_url = f"{naa_url}?code={naa_key}"
             print(f"\n[TRIGGER] Calling NAA at {naa_url}")
             httpx.post(naa_url, timeout=30.0)
             print(f"[TRIGGER] NAA triggered successfully for {request_id}")

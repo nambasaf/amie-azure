@@ -32,9 +32,9 @@ export default function RequestTable() {
     try {
       setLoading(true);
       const baseUrl = import.meta.env.VITE_API_BASE; // use ingestion host
-      const authCode = import.meta.env.VITE_API_CODE;
+      const authCode = import.meta.env.VITE_INGESTION_AGENT_FUNCTION_KEY;
 
-      const url = `${baseUrl}/requests?code=${authCode}`;
+      const url = `${baseUrl}/api/requests?code=${authCode}`;
       const { data } = await axios.get(url);
 
       const sorted = Array.isArray(data)
