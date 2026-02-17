@@ -48,9 +48,7 @@ TABLE_NAME = "IngestionRequests"
 # ------------------- Azure Clients -------------------
 agents_client = AgentsClient(
     endpoint=PROJECT_ENDPOINT,
-    credential=DefaultAzureCredential(
-        exclude_environment_credential=True, exclude_managed_identity_credential=True
-    ),
+    credential=DefaultAzureCredential(),
 )
 
 # Storage clients - will be initialized with connection string (from env or CLI)
