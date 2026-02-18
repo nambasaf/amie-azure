@@ -21,6 +21,9 @@ import subprocess
 import pathlib
 import logging
 import azure.functions as func
+from azure.core.match_conditions import MatchConditions
+
+
 
 # Ensure project root is on path so `backend` package is importable
 ROOT = (
@@ -53,6 +56,45 @@ def run_idca(req: func.HttpRequest) -> func.HttpResponse:  # noqa: D401
     # Directly import and run the IDCA agent
     # This ensures the Azure Function stays alive until the job is done
     try:
+        from azure.data.tables import TableClient
+        from datetime import datetime
+        import logging
+
+        table_client = TableClient.from_connection_string(STORAGE, "IngestionRequests")
+        
+        # 1. Idempotency Check & Job Claiming
+        try:
+            entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
+            status = entity.get("status", "").lower()
+            
+            # If already processing or done, skip
+            if status in ["classifying", "classified", "completed", "failed"]:
+                logging.info(f"Request {request_id} is already in state '{status}'. Skipping duplicate trigger.")
+                return func.HttpResponse(f"Request {request_id} already being processed or completed.", status_code=200)
+
+            # 2. Claim the job (with optimistic concurrency)
+            entity["status"] = "classifying"
+            entity["classifying_started_at"] = datetime.utcnow().isoformat()
+            
+            # Use the ETag to ensure no one else claimed it since we read it
+            table_client.update_entity(
+                entity,
+                mode="replace",
+                etag=entity.metadata["etag"],
+                match_condition=MatchConditions.IfNotModified
+            )
+            logging.info(f"Successfully claimed IDCA job for {request_id}")
+
+        except Exception as claim_err:
+            # If ETag mismatch, someone else probably grabbed it
+            if "ConditionNotMet" in str(claim_err) or "UpdateConditionNotSatisfied" in str(claim_err):
+                logging.info(f"Race condition: Request {request_id} was recently claimed by another process. Skipping.")
+                return func.HttpResponse(f"Request {request_id} already claimed.", status_code=200)
+            
+            logging.error(f"Error checking/claiming job for {request_id}: {claim_err}")
+            # Optional: Decide if we want to proceed anyway or fail. 
+            # Proceeding anyway as fallback if it's just a read error.
+
         from idca import run_idca
         
         logging.info(f"Starting IDCA logic directly for {request_id}")

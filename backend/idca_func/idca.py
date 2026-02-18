@@ -255,8 +255,24 @@ def run_idca(request_id: str):
     except Exception as e:
         print(f"\n[WARNING] Failed to update status to 'classifying': {e}")
 
-    # Execute IDCA agent with retry logic
-    result = retry_agent(execute_idca_agent, "IDCA Agent")
+    # Execute IDCA agent with retry logic (bounded to 5 attempts)
+    try:
+        result = retry_agent(execute_idca_agent, "IDCA Agent", max_attempts=5)
+    except Exception as e:
+        error_msg = f"IDCA failed after all retries: {str(e)}"
+        print(f"\n[ERROR] {error_msg}")
+        try:
+            from datetime import datetime
+            entity = table.get_entity("AMIE", request_id)
+            entity["status"] = "failed"
+            entity["error"] = error_msg[:1000] # Truncate for table storage
+            entity["failed_at"] = datetime.utcnow().isoformat()
+            table.update_entity(entity)
+            print(f"[STATUS] Set to 'failed' for request {request_id}")
+        except Exception as update_err:
+            print(f"[ERROR] Failed to update status to 'failed': {update_err}")
+        raise # Re-raise to signal failure to the caller
+
     response = result["response"]
     idca_json = result["idca_json"]
 
