@@ -33,7 +33,8 @@ def idca_queue_worker(msg: func.QueueMessage):
     if key:
         url = f"{url}?code={key}"
     try:
-        r = httpx.post(url, timeout=30.0)
+        # Increased timeout to 10 minutes to allow IDCA's LLM run to finish without retrying
+        r = httpx.post(url, timeout=600.0)
         r.raise_for_status()
         logging.info(
             f"[IDCA QUEUE] triggered IDCA app for {request_id}: {r.status_code}"

@@ -12,6 +12,7 @@ from naa_test import run_steps_8_to_12
 from rm_retrieval import download_and_store_rms
 from rm_assessment import assess_all_rms
 from prior_art_open import search_prior_art
+from dataclasses import asdict
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -234,7 +235,9 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         naa_output_json = {
             "ss_synopsis": naa_outputs.ss_synopsis,
             "ucs": naa_outputs.ucs,
-            "lor": filtered_lor, # <--- FILTERED
+            "ss": asdict(naa_outputs.ss),
+            "ssr": asdict(naa_outputs.ssr),
+            "lor": filtered_lor if filtered_lor else naa_outputs.lor,
             "source_citation": idca_output.get("source_citation", "Unknown"), # <--- PRESERVED FROM IDCA
         }
         if assessments:

@@ -291,7 +291,7 @@ def run_idca(request_id: str):
                 aa_url = f"{aa_url}?code={aa_key}"
             
             print(f"\n[TRIGGER] Calling AA at {aa_url}")
-            httpx.post(aa_url, timeout=30.0)
+            httpx.post(aa_url, timeout=120.0) # Increased to 2m for AA startup
             
             # Mark as completed for the UI
             from datetime import datetime
@@ -320,7 +320,7 @@ def run_idca(request_id: str):
             if naa_key:
                 naa_url = f"{naa_url}?code={naa_key}"
             print(f"\n[TRIGGER] Calling NAA at {naa_url}")
-            httpx.post(naa_url, timeout=30.0)
+            httpx.post(naa_url, timeout=120.0) # Increased to 2m for NAA startup
             print(f"[TRIGGER] NAA triggered successfully for {request_id}")
         except Exception as e:
             print(f"\n[ERROR] Failed to trigger NAA: {e}")
