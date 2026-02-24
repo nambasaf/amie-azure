@@ -67,7 +67,7 @@ def run_idca(req: func.HttpRequest) -> func.HttpResponse:  # noqa: D401
             status = entity.get("status", "").lower()
             
             # If already processing or done, skip
-            if status in ["classifying", "classified", "completed", "failed"]:
+            if status in ["classifying", "classified", "completed", "assessed", "analyzing", "failed"]:
                 logging.info(f"Request {request_id} is already in state '{status}'. Skipping duplicate trigger.")
                 return func.HttpResponse(f"Request {request_id} already being processed or completed.", status_code=200)
 

@@ -66,9 +66,14 @@ def run_aa(req: func.HttpRequest) -> func.HttpResponse:
             status = entity.get("status", "").lower()
             
             # If already processing or done, skip
-            if status in ["completed"]:
-                logging.info(f"Request {request_id} is already in state '{status}'. Skipping duplicate AA trigger.")
-                return func.HttpResponse(f"Request {request_id} already completed.", status_code=200)
+            if status != "assessed":
+                logging.info(
+                    f"AA cannot run from state '{status}'. Expected 'assessed'. Skipping."
+                )
+                return func.HttpResponse(
+                    f"AA cannot run from state '{status}'.",
+                    status_code=200,
+            )
 
             # Note: We don't have a specific "aggregating" status in the current UI, 
             # but we can claim it to prevent overlapping runs.

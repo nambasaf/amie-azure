@@ -179,9 +179,12 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
             status = entity.get("status", "").lower()
             
             # If already processing or done, skip
-            if status in ["analyzing", "assessed", "completed"]:
-                logging.info(f"Request {request_id} is already in state '{status}'. Skipping duplicate NAA trigger.")
-                return func.HttpResponse(f"Request {request_id} already being processed or completed.", status_code=200)
+            if status != "classified":
+                logging.info(f"NAA cannot run from state '{status}'. Skipping.")
+                return func.HttpResponse(
+                    f"NAA cannot run from state '{status}'.",
+                    status_code=200
+                )
 
             # Claim the job (with optimistic concurrency)
             entity["status"] = "analyzing"
@@ -316,7 +319,7 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
 
             aa_base = os.getenv("AA_BASE", "https://aa-func-habphsfdg5ejgtcy.westus2-01.azurewebsites.net/").rstrip("/")
             key = os.getenv("AA_FUNCTION_KEY", "")
-            url = f"{aa_base}/aa/run/{request_id}"
+            url = f"{aa_base}/api/aa/run/{request_id}"
             if key:
                 url = f"{url}?code={key}"
             r = httpx.post(url, timeout=120.0)
