@@ -50,10 +50,7 @@ def get_agents_client():
 
     _agents_client = AgentsClient(
         endpoint=endpoint,
-        credential=DefaultAzureCredential(
-            exclude_environment_credential=True,
-            exclude_managed_identity_credential=True,
-        ),
+        credential=DefaultAzureCredential(),
     )
     return _agents_client
 

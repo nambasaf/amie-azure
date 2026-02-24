@@ -5,3 +5,5 @@ azure-data-tables
 PyPDF2
 httpx
 python-dotenv
+azure-core
+

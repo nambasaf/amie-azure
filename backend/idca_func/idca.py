@@ -48,9 +48,7 @@ TABLE_NAME = "IngestionRequests"
 # ------------------- Azure Clients -------------------
 agents_client = AgentsClient(
     endpoint=PROJECT_ENDPOINT,
-    credential=DefaultAzureCredential(
-        exclude_environment_credential=True, exclude_managed_identity_credential=True
-    ),
+    credential=DefaultAzureCredential(),
 )
 
 # Storage clients - will be initialized with connection string (from env or CLI)
@@ -257,8 +255,24 @@ def run_idca(request_id: str):
     except Exception as e:
         print(f"\n[WARNING] Failed to update status to 'classifying': {e}")
 
-    # Execute IDCA agent with retry logic
-    result = retry_agent(execute_idca_agent, "IDCA Agent")
+    # Execute IDCA agent with retry logic (bounded to 5 attempts)
+    try:
+        result = retry_agent(execute_idca_agent, "IDCA Agent", max_attempts=5)
+    except Exception as e:
+        error_msg = f"IDCA failed after all retries: {str(e)}"
+        print(f"\n[ERROR] {error_msg}")
+        try:
+            from datetime import datetime
+            entity = table.get_entity("AMIE", request_id)
+            entity["status"] = "failed"
+            entity["error"] = error_msg[:1000] # Truncate for table storage
+            entity["failed_at"] = datetime.utcnow().isoformat()
+            table.update_entity(entity)
+            print(f"[STATUS] Set to 'failed' for request {request_id}")
+        except Exception as update_err:
+            print(f"[ERROR] Failed to update status to 'failed': {update_err}")
+        raise # Re-raise to signal failure to the caller
+
     response = result["response"]
     idca_json = result["idca_json"]
 
@@ -286,14 +300,14 @@ def run_idca(request_id: str):
 
         try:
             # Trigger Aggregation Agent via HTTP
-            AA_BASE = os.getenv("AA_BASE", "https://aa-func-habphsfdg5ejgtcy.westus2-01.azurewebsites.net/").rstrip("/")
+            AA_BASE = os.getenv("AA_BASE", "https://aa-func-habphsfdg5ejgtcy.westus2-01.azurewebsites.net").rstrip("/")
             aa_key = os.getenv("AA_FUNCTION_KEY", "")
-            aa_url = f"{AA_BASE}/aa/run/{request_id}"
+            aa_url = f"{AA_BASE}/api/aa/run/{request_id}"
             if aa_key:
                 aa_url = f"{aa_url}?code={aa_key}"
             
             print(f"\n[TRIGGER] Calling AA at {aa_url}")
-            httpx.post(aa_url, timeout=30.0)
+            httpx.post(aa_url, timeout=120.0) # Increased to 2m for AA startup
             
             # Mark as completed for the UI
             from datetime import datetime
@@ -316,10 +330,13 @@ def run_idca(request_id: str):
     # -------------------------------
     if idca_json.get("status_determination") == "Present":
         try:
-            NAA_BASE = os.getenv("NAA_BASE", "https://naa-amie-dkdfggcbaghzdebr.westus2-01.azurewebsites.net/")
-            naa_url = f"{NAA_BASE}/worker/run/{request_id}"
+            NAA_BASE = os.getenv("NAA_BASE", "https://naa-amie-dkdfggcbaghzdebr.westus2-01.azurewebsites.net").rstrip("/")
+            naa_key = os.getenv("NAA_FUNCTION_KEY", "")
+            naa_url = f"{NAA_BASE}/api/worker/run/{request_id}"
+            if naa_key:
+                naa_url = f"{naa_url}?code={naa_key}"
             print(f"\n[TRIGGER] Calling NAA at {naa_url}")
-            httpx.post(naa_url, timeout=30.0)
+            httpx.post(naa_url, timeout=120.0) # Increased to 2m for NAA startup
             print(f"[TRIGGER] NAA triggered successfully for {request_id}")
         except Exception as e:
             print(f"\n[ERROR] Failed to trigger NAA: {e}")

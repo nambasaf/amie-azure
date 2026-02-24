@@ -27,13 +27,14 @@ def idca_queue_worker(msg: func.QueueMessage):
     logging.info(f"[IDCA QUEUE] received request_id={request_id} (will trigger standalone IDCA app)")
 
     # Call the IDCA function app; IDCA runs in that app, not in this process
-    idca_base = os.getenv("IDCA_BASE", "https://idca-func-hbergrcufpbmh2e5.westus2-01.azurewebsites.net/").rstrip("/")
+    idca_base = os.getenv("IDCA_BASE", "https://idca-func-hbergrcufpbmh2e5.westus2-01.azurewebsites.net").rstrip("/")
     key = os.getenv("IDCA_FUNCTION_KEY", "")
-    url = f"{idca_base}/idca/run/{request_id}"
+    url = f"{idca_base}/api/idca/run/{request_id}"
     if key:
         url = f"{url}?code={key}"
     try:
-        r = httpx.post(url, timeout=30.0)
+        # Increased timeout to 10 minutes to allow IDCA's LLM run to finish without retrying
+        r = httpx.post(url, timeout=600.0)
         r.raise_for_status()
         logging.info(
             f"[IDCA QUEUE] triggered IDCA app for {request_id}: {r.status_code}"

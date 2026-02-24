@@ -12,6 +12,7 @@ from naa_test import run_steps_8_to_12
 from rm_retrieval import download_and_store_rms
 from rm_assessment import assess_all_rms
 from prior_art_open import search_prior_art
+from dataclasses import asdict
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -151,7 +152,6 @@ def get_status(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # === POST /worker/run/{request_id} — RUN §102 ANALYSIS ===
-# === POST /worker/run/{request_id} — RUN §102 ANALYSIS ===
 @app.route(route="worker/run/{request_id}", methods=["POST"])
 async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
     """Full NAA pipeline (Steps 8–17) implemented via naa_brain_MVP modules."""
@@ -161,17 +161,59 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # ------------------------------------------------------------------
         # 0. Fetch ingestion record and verify state
         # ------------------------------------------------------------------
+        from azure.data.tables import TableClient
+        from azure.core import MatchConditions
+        from datetime import datetime
+
         blob_service, container_client, table_service = get_storage_clients()
         ing_table = table_service.get_table_client(INGESTION_TABLE)
-        entity = ing_table.get_entity("AMIE", request_id)
-        if entity.get("status") not in ("classified", "analyzing"):
-            return func.HttpResponse("IDCA not completed", status_code=400)
-
-        # Set status to analyzing (merge so we don't re-send large idca_output)
-        ing_table.update_entity(
-            {"PartitionKey": "AMIE", "RowKey": request_id, "status": "analyzing"},
-            mode="merge",
+        
+        # Idempotency check & job claiming
+        table_client = TableClient.from_connection_string(
+            os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage"), 
+            INGESTION_TABLE
         )
+        
+        try:
+            entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
+            status = entity.get("status", "").lower()
+            
+            # If already processing or done, skip
+            if status != "classified":
+                logging.info(f"NAA cannot run from state '{status}'. Skipping.")
+                return func.HttpResponse(
+                    f"NAA cannot run from state '{status}'.",
+                    status_code=200
+                )
+
+            # Claim the job (with optimistic concurrency)
+            entity["status"] = "analyzing"
+            entity["naa_started_at"] = datetime.utcnow().isoformat()
+            
+            table_client.update_entity(
+                entity, 
+                mode='replace', 
+                etag=entity.metadata.get('etag'),
+                match_condition=MatchConditions.IfNotModified
+            )
+            logging.info(f"Successfully claimed NAA job for {request_id}")
+
+        except Exception as claim_err:
+            if "ConditionNotMet" in str(claim_err) or "UpdateConditionNotSatisfied" in str(claim_err):
+                logging.info(
+                    f"Race condition: NAA Request {request_id} was recently claimed. Skipping."
+                )
+                return func.HttpResponse(
+                    f"Request {request_id} already claimed.", status_code=200
+                )
+
+            logging.error(
+                f"Error checking/claiming NAA job for {request_id}: {claim_err}"
+            )
+            return func.HttpResponse(
+                "Failed to fetch or claim ingestion record.",
+                status_code=500
+            )          
 
         filename = entity["filename"]
         idca_output = json.loads(entity.get("idca_output", "{}"))
@@ -234,7 +276,9 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         naa_output_json = {
             "ss_synopsis": naa_outputs.ss_synopsis,
             "ucs": naa_outputs.ucs,
-            "lor": filtered_lor, # <--- FILTERED
+            "ss": asdict(naa_outputs.ss),
+            "ssr": asdict(naa_outputs.ssr),
+            "lor": filtered_lor if filtered_lor else naa_outputs.lor,
             "source_citation": idca_output.get("source_citation", "Unknown"), # <--- PRESERVED FROM IDCA
         }
         if assessments:
@@ -275,7 +319,7 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
 
             aa_base = os.getenv("AA_BASE", "https://aa-func-habphsfdg5ejgtcy.westus2-01.azurewebsites.net/").rstrip("/")
             key = os.getenv("AA_FUNCTION_KEY", "")
-            url = f"{aa_base}/aa/run/{request_id}"
+            url = f"{aa_base}/api/aa/run/{request_id}"
             if key:
                 url = f"{url}?code={key}"
             r = httpx.post(url, timeout=120.0)
