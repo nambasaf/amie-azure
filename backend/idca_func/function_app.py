@@ -21,7 +21,6 @@ import subprocess
 import pathlib
 import logging
 import azure.functions as func
-# from azure.core.match_conditions import MatchConditions  <-- Removed to prevent indexing failure on remote
 
 
 
@@ -73,7 +72,7 @@ def run_idca(req: func.HttpRequest) -> func.HttpResponse:  # noqa: D401
                 return func.HttpResponse(f"Request {request_id} already being processed or completed.", status_code=200)
 
             # 2. Claim the job (with optimistic concurrency)
-            from azure.core.match_conditions import MatchConditions
+            from azure.core import MatchConditions
             entity["status"] = "classifying"
             entity["classifying_started_at"] = datetime.utcnow().isoformat()
             

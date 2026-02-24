@@ -163,7 +163,7 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # 0. Fetch ingestion record and verify state
         # ------------------------------------------------------------------
         from azure.data.tables import TableClient
-        from azure.core.match_conditions import MatchConditions
+        from azure.core import MatchConditions
         from datetime import datetime
 
         blob_service, container_client, table_service = get_storage_clients()

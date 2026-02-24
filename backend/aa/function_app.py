@@ -55,7 +55,7 @@ def run_aa(req: func.HttpRequest) -> func.HttpResponse:
 
     try:
         from azure.data.tables import TableClient
-        from azure.core.match_conditions import MatchConditions
+        from azure.core import MatchConditions
         from datetime import datetime
 
         # 1. Idempotency Check & Job Claiming
