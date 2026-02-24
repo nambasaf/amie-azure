@@ -152,7 +152,6 @@ def get_status(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # === POST /worker/run/{request_id} — RUN §102 ANALYSIS ===
-# === POST /worker/run/{request_id} — RUN §102 ANALYSIS ===
 @app.route(route="worker/run/{request_id}", methods=["POST"])
 async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
     """Full NAA pipeline (Steps 8–17) implemented via naa_brain_MVP modules."""
@@ -167,6 +166,7 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         from datetime import datetime
 
         blob_service, container_client, table_service = get_storage_clients()
+        ing_table = table_service.get_table_client(INGESTION_TABLE)
         
         # Idempotency check & job claiming
         table_client = TableClient.from_connection_string(
@@ -197,13 +197,20 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
 
         except Exception as claim_err:
             if "ConditionNotMet" in str(claim_err) or "UpdateConditionNotSatisfied" in str(claim_err):
-                logging.info(f"Race condition: NAA Request {request_id} was recently claimed. Skipping.")
-                return func.HttpResponse(f"Request {request_id} already claimed.", status_code=200)
-            
-            logging.error(f"Error checking/claiming NAA job for {request_id}: {claim_err}")
-            # Fallback check (original logic)
-            if entity.get("status") not in ("classified", "analyzing"):
-                return func.HttpResponse("IDCA not completed", status_code=400)
+                logging.info(
+                    f"Race condition: NAA Request {request_id} was recently claimed. Skipping."
+                )
+                return func.HttpResponse(
+                    f"Request {request_id} already claimed.", status_code=200
+                )
+
+            logging.error(
+                f"Error checking/claiming NAA job for {request_id}: {claim_err}"
+            )
+            return func.HttpResponse(
+                "Failed to fetch or claim ingestion record.",
+                status_code=500
+            )          
 
         filename = entity["filename"]
         idca_output = json.loads(entity.get("idca_output", "{}"))
