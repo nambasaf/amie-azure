@@ -137,7 +137,7 @@ def run_aa(req: func.HttpRequest) -> func.HttpResponse:
 
         # Update status to completed
         entity["status"] = "completed"
-        entity["completed_at"] = datetime.datetime.utcnow().isoformat()
+        entity["completed_at"] = datetime.utcnow().isoformat()
 
         # Handle AA output storage (Blob if large, Table if small)
         blob_path = f"aa-outputs/{request_id}.md"
@@ -156,7 +156,7 @@ def run_aa(req: func.HttpRequest) -> func.HttpResponse:
             entity["aa_output"] = final_report
             entity.pop("aa_output_blob", None)
 
-        table.update_entity(entity)
+        table_client.update_entity(entity)
 
         logging.info(f"AA completed for request {request_id}")
         return func.HttpResponse(
