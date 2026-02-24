@@ -8,3 +8,4 @@ tqdm
 python-dotenv
 azure-ai-agents
 azure-identity
+azure-core

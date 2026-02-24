@@ -4,3 +4,4 @@ azure-storage-blob
 azure-ai-agents
 azure-identity
 python-dotenv
+azure-core

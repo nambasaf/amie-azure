@@ -54,12 +54,42 @@ def run_aa(req: func.HttpRequest) -> func.HttpResponse:
         )
 
     try:
-        # Get table client
-        table_service = TableServiceClient.from_connection_string(STORAGE)
-        table = table_service.get_table_client(TABLE_NAME)
+        from azure.data.tables import TableClient
+        from azure.core.match_conditions import MatchConditions
+        from datetime import datetime
 
-        # Retrieve entity
-        entity = table.get_entity("AMIE", request_id)
+        # 1. Idempotency Check & Job Claiming
+        table_client = TableClient.from_connection_string(STORAGE, TABLE_NAME)
+        
+        try:
+            entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
+            status = entity.get("status", "").lower()
+            
+            # If already processing or done, skip
+            if status in ["completed"]:
+                logging.info(f"Request {request_id} is already in state '{status}'. Skipping duplicate AA trigger.")
+                return func.HttpResponse(f"Request {request_id} already completed.", status_code=200)
+
+            # Note: We don't have a specific "aggregating" status in the current UI, 
+            # but we can claim it to prevent overlapping runs.
+            entity["aa_started_at"] = datetime.utcnow().isoformat()
+            
+            table_client.update_entity(
+                entity, 
+                mode='replace', 
+                etag=entity.metadata.get('etag'),
+                match_condition=MatchConditions.IfNotModified
+            )
+            logging.info(f"Successfully claimed AA job for {request_id}")
+
+        except Exception as claim_err:
+            if "ConditionNotMet" in str(claim_err) or "UpdateConditionNotSatisfied" in str(claim_err):
+                logging.info(f"Race condition: AA Request {request_id} was recently claimed. Skipping.")
+                return func.HttpResponse(f"Request {request_id} already claimed.", status_code=200)
+            
+            logging.error(f"Error checking/claiming AA job for {request_id}: {claim_err}")
+            # Proceed anyway if it's just a read error
+            entity = table_client.get_entity("AMIE", request_id)
 
         # Parse IDCA output
         idca_output_str = entity.get("idca_output", "{}")

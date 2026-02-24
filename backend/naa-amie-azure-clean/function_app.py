@@ -162,17 +162,48 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # ------------------------------------------------------------------
         # 0. Fetch ingestion record and verify state
         # ------------------------------------------------------------------
-        blob_service, container_client, table_service = get_storage_clients()
-        ing_table = table_service.get_table_client(INGESTION_TABLE)
-        entity = ing_table.get_entity("AMIE", request_id)
-        if entity.get("status") not in ("classified", "analyzing"):
-            return func.HttpResponse("IDCA not completed", status_code=400)
+        from azure.data.tables import TableClient
+        from azure.core.match_conditions import MatchConditions
+        from datetime import datetime
 
-        # Set status to analyzing (merge so we don't re-send large idca_output)
-        ing_table.update_entity(
-            {"PartitionKey": "AMIE", "RowKey": request_id, "status": "analyzing"},
-            mode="merge",
+        blob_service, container_client, table_service = get_storage_clients()
+        
+        # Idempotency check & job claiming
+        table_client = TableClient.from_connection_string(
+            os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage"), 
+            INGESTION_TABLE
         )
+        
+        try:
+            entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
+            status = entity.get("status", "").lower()
+            
+            # If already processing or done, skip
+            if status in ["analyzing", "assessed", "completed"]:
+                logging.info(f"Request {request_id} is already in state '{status}'. Skipping duplicate NAA trigger.")
+                return func.HttpResponse(f"Request {request_id} already being processed or completed.", status_code=200)
+
+            # Claim the job (with optimistic concurrency)
+            entity["status"] = "analyzing"
+            entity["naa_started_at"] = datetime.utcnow().isoformat()
+            
+            table_client.update_entity(
+                entity, 
+                mode='replace', 
+                etag=entity.metadata.get('etag'),
+                match_condition=MatchConditions.IfNotModified
+            )
+            logging.info(f"Successfully claimed NAA job for {request_id}")
+
+        except Exception as claim_err:
+            if "ConditionNotMet" in str(claim_err) or "UpdateConditionNotSatisfied" in str(claim_err):
+                logging.info(f"Race condition: NAA Request {request_id} was recently claimed. Skipping.")
+                return func.HttpResponse(f"Request {request_id} already claimed.", status_code=200)
+            
+            logging.error(f"Error checking/claiming NAA job for {request_id}: {claim_err}")
+            # Fallback check (original logic)
+            if entity.get("status") not in ("classified", "analyzing"):
+                return func.HttpResponse("IDCA not completed", status_code=400)
 
         filename = entity["filename"]
         idca_output = json.loads(entity.get("idca_output", "{}"))
