@@ -22,6 +22,8 @@ import pathlib
 import logging
 import azure.functions as func
 
+
+
 # Ensure project root is on path so `backend` package is importable
 ROOT = (
     pathlib.Path(__file__).resolve().parents[2]
@@ -50,37 +52,57 @@ def run_idca(req: func.HttpRequest) -> func.HttpResponse:  # noqa: D401
             "Storage connection string not configured", status_code=500
         )
 
-    # Build command: python -m backend.idca.idca --request-id <id> --storage <conn>
-    cmd = [
-        PYTHON,
-        "-m",
-        "backend.idca.idca",
-        "--request-id",
-        request_id,
-        "--storage",
-        STORAGE,
-    ]
-
-    # Launch without waiting (fire-and-forget)
-    # But capture output to a log file so we can debug
+    # Directly import and run the IDCA agent
+    # This ensures the Azure Function stays alive until the job is done
     try:
-        log_file = ROOT / "idca_logs" / f"idca_{request_id}.log"
-        log_file.parent.mkdir(exist_ok=True)
+        from azure.data.tables import TableClient
+        from datetime import datetime
+        import logging
 
-        with open(log_file, "w") as log:
-            process = subprocess.Popen(
-                cmd,
-                cwd=str(ROOT),
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                text=True,
+        table_client = TableClient.from_connection_string(STORAGE, "IngestionRequests")
+        
+        # 1. Idempotency Check & Job Claiming
+        try:
+            entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
+            status = entity.get("status", "").lower()
+            
+            # If already processing or done, skip
+            if status in ["classifying", "classified", "completed", "assessed", "analyzing", "failed"]:
+                logging.info(f"Request {request_id} is already in state '{status}'. Skipping duplicate trigger.")
+                return func.HttpResponse(f"Request {request_id} already being processed or completed.", status_code=200)
+
+            # 2. Claim the job (with optimistic concurrency)
+            from azure.core import MatchConditions
+            entity["status"] = "classifying"
+            entity["classifying_started_at"] = datetime.utcnow().isoformat()
+            
+            # Use the ETag to ensure no one else claimed it since we read it
+            table_client.update_entity(
+                entity,
+                mode="replace",
+                etag=entity.metadata["etag"],
+                match_condition=MatchConditions.IfNotModified
             )
-        logging.info(
-            f"IDCA subprocess started for {request_id} (PID: {process.pid}, log: {log_file})"
-        )
+            logging.info(f"Successfully claimed IDCA job for {request_id}")
+
+        except Exception as claim_err:
+            # If ETag mismatch, someone else probably grabbed it
+            if "ConditionNotMet" in str(claim_err) or "UpdateConditionNotSatisfied" in str(claim_err):
+                logging.info(f"Race condition: Request {request_id} was recently claimed by another process. Skipping.")
+                return func.HttpResponse(f"Request {request_id} already claimed.", status_code=200)
+            
+            logging.error(f"Error checking/claiming job for {request_id}: {claim_err}")
+            # Optional: Decide if we want to proceed anyway or fail. 
+            # Proceeding anyway as fallback if it's just a read error.
+
+        from idca import run_idca
+        
+        logging.info(f"Starting IDCA logic directly for {request_id}")
+        run_idca(request_id)
+        logging.info(f"IDCA logic completed for {request_id}")
     except Exception as e:
-        logging.error(f"Failed to start IDCA subprocess: {e}", exc_info=True)
-        return func.HttpResponse(f"Failed to start IDCA: {e}", status_code=500)
+        logging.error(f"IDCA logic failed for {request_id}: {e}", exc_info=True)
+        return func.HttpResponse(f"Failed to run IDCA: {e}", status_code=500)
 
     return func.HttpResponse(
         f"IDCA started for {request_id}", status_code=202, mimetype="text/plain"

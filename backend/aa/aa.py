@@ -21,51 +21,67 @@ from azure.ai.agents import AgentsClient
 from azure.ai.agents.models import MessageRole
 from azure.identity import DefaultAzureCredential
 
-from backend.utils.retry import retry_agent
+try:
+    from retry import retry_agent
+except ImportError:
+    # If imported from within the backend package (e.g. by idca.py)
+    from backend.aa.retry import retry_agent
 
 # ------------------------------------------------------------------
-# ENVIRONMENT
+# LAZY AZURE CLIENT & ENV VALIDATION
 # ------------------------------------------------------------------
-load_dotenv()
+_agents_client = None
 
-PROJECT_ENDPOINT = os.getenv("PROJECT_ENDPOINT")
-AGGREGATION_AGENT_ID = os.getenv("AGGREGATION_AGENT_ID")
+def get_agents_client():
+    global _agents_client
+    if _agents_client is not None:
+        return _agents_client
 
-if not PROJECT_ENDPOINT:
-    raise ValueError("PROJECT_ENDPOINT missing in environment")
-if not AGGREGATION_AGENT_ID:
-    raise ValueError("AGGREGATION_AGENT_ID missing in environment")
+    load_dotenv()
+    
+    endpoint = os.getenv("PROJECT_ENDPOINT")
+    if not endpoint:
+        # In Azure, these should be set in App Settings
+        raise ValueError("Environment variable 'PROJECT_ENDPOINT' is missing. Please set it in Azure App Settings or .env")
 
-# ------------------------------------------------------------------
-# AZURE CLIENT
-# ------------------------------------------------------------------
-agents_client = AgentsClient(
-    endpoint=PROJECT_ENDPOINT,
-    credential=DefaultAzureCredential(
-        exclude_environment_credential=True,
-        exclude_managed_identity_credential=True,
-    ),
-)
+    from azure.ai.agents import AgentsClient
+
+    _agents_client = AgentsClient(
+        endpoint=endpoint,
+        credential=DefaultAzureCredential(),
+    )
+    return _agents_client
+
+
+def get_agent_id(var_name: str) -> str:
+    agent_id = os.getenv(var_name)
+    if not agent_id:
+        raise ValueError(f"Environment variable '{var_name}' is missing. Please set it in Azure App Settings or .env")
+    return agent_id
+
 
 # ------------------------------------------------------------------
 # HELPER – RUN AGENT ONCE
 # ------------------------------------------------------------------
 def _run_aa(prompt: str) -> str:
     """Creates a thread, sends user prompt, runs AA, returns final reply text."""
-    thread = agents_client.threads.create()
+    client = get_agents_client()
+    agent_id = get_agent_id("AGGREGATION_AGENT_ID")
+    
+    thread = client.threads.create()
 
-    agents_client.messages.create(
+    client.messages.create(
         thread_id=thread.id,
         role=MessageRole.USER,
         content=prompt,
     )
 
-    agents_client.runs.create_and_process(
+    client.runs.create_and_process(
         thread_id=thread.id,
-        agent_id=AGGREGATION_AGENT_ID,
+        agent_id=agent_id,
     )
 
-    msgs = list(agents_client.messages.list(thread_id=thread.id))
+    msgs = list(client.messages.list(thread_id=thread.id))
     for m in reversed(msgs):
         if m.role == "assistant" and m.text_messages:
             return m.text_messages[-1].text.value.strip()
@@ -83,25 +99,13 @@ def build_prompt(
     """Builds a STRICT SSOW prompt for the Aggregation Agent."""
 
     citation = idca_output.get("source_citation", "Unknown Citation")
-    status = idca_output.get("status_determination", "").strip().lower()
-    idca_output["status_determination"] = (
-        "Present" if status == "present" else idca_output.get("status_determination")
-    )
-
-    print(
-    f"[AA DEBUG] CASE CHECK -> status={idca_output.get('status_determination')}, "
-    f"assessments={len(naa_assessments or [])}"
-)
-
-
+    status = (idca_output.get("status_determination") or "").strip().lower()
     justification = idca_output.get("justification", "")
 
     ss_synopsis = getattr(naa_output, "ss_synopsis", "Not available")
 
-    # ------------------------------------------------------------
-    # CASE A — NO INVENTION PRESENT
-    # ------------------------------------------------------------
-    if status != "Present":
+    # ---------------- CASE A – No Invention Present ----------------
+    if status != "present":
         return f"""
 **AMIE Final Results**
 
@@ -114,17 +118,54 @@ Justification:
 {justification}
 """
 
-    # ------------------------------------------------------------
-    # CASE B — INVENTION PRESENT, BUT NO ASSESSMENTS
-    # ------------------------------------------------------------
-    if not naa_assessments:
+    # ---------------- CASE B – Invention Present ----------------
+    context_header = f"**AMIE Final Results**\n*Source Manuscript*: {citation}\n*Source Structure*: {ss_synopsis}\n"
+
+    # ------------ Deep-analysis path (assessments present) --------
+    if naa_assessments:
+        # Helper to handle both object (attribute) and dict (item) access
+        def get_val(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        sorted_assess = sorted(
+            naa_assessments, 
+            key=lambda a: get_val(a, "sos_score", {}).get("ewss", 0), 
+            reverse=True
+        )
+        frt_md = "| Citation | RS Synopsis | CSS | EWSS |\n|---|---|---|---|\n"
+        for a in sorted_assess:
+            score = get_val(a, "sos_score", {})
+            css = score.get("css", 0)
+            ewss = score.get("ewss", 0)
+            
+            raw_cit = get_val(a, "reference_citation", "Unknown")
+            cit = (
+                raw_cit.replace("\n", " ")[:100] + "..."
+                if len(raw_cit) > 100
+                else raw_cit
+            )
+            syn = get_val(a, "rs_synopsis", "Not available").replace("\n", " ")
+            frt_md += f"| {cit} | {syn} | {css} | {ewss} |\n"
+
         return f"""
-**AMIE Final Results**
+{context_header}
 
-*Source Manuscript*: {citation}
-*Source Structure*: {ss_synopsis}
+INSTRUCTIONS FOR FINAL REPORT:
+1. You are the Aggregation Agent (AA).
+2. Display the Final Reference Table (FRT) exactly as provided below.
+3. Keep the Context Header above the table.
+4. AFTER the table, you MUST include a section titled "**Novelty Verdict**".
+5. The Novelty Verdict MUST be one of:
+   - NOVEL
+   - NOT NOVEL
+   - INCONCLUSIVE
+6. Do NOT use hedging language ("may", "appears", "potentially") in the verdict line.
+7. After the verdict line, include a short **Rationale** (2–4 sentences) that
+   justifies the verdict using CSS/EWSS comparisons.
 
-Novelty cannot be determined due to missing structural assessment data.
+DATA TO DISPLAY:\n\n{frt_md}
 """
 
     # ------------------------------------------------------------
@@ -196,7 +237,10 @@ def run_aggregation_agent(
     request_id: str | None = None,
     table=None,
 ) -> str:
-    """Executes AA prompt with retries and persists output if requested."""
+    """Executes AA prompt with retries and persists to Table if provided."""
+
+    if naa_assessments is None:
+        raise ValueError("AA called with naa_assessments=None — invalid pipeline state")
 
     prompt = build_prompt(idca_output, naa_output, naa_assessments)
 

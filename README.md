@@ -6,7 +6,7 @@ Academic Manuscript IP Evaluator (AMIE) deployed on Azure AI + Functions. Upload
 - **React frontend (Vite)**: single-page drag/drop uploader (`src/`) that POSTs PDFs/DOCs to an Azure Function.
 - **Ingestion Function** (`backend/ingestion-agent/function_app.py`): HTTP `POST /upload` stores files in Blob Storage (`manuscript-uploads`) and logs metadata to Table Storage (`IngestionRequests`). Also exposes request listing/status endpoints.
 - **IDCA script** (`backend/idca/idca.py`): pulls an uploaded PDF from Blob, extracts text, and runs an Azure AI Agents deployment with a strict JSON prompt to classify invention presence and structure. Writes JSON back to the ingestion table.
-- **NAA Functions app** (`backend/naa/function_app.py`): performs novelty assessment after IDCA. Uses the IDCA synopsis/claims to search PatentsView, OpenAlex, and Semantic Scholar (`backend/naa/prior_art_open.py`), scores novelty/§102 risk, and stores results to the same table.
+- **NAA Functions app** (`backend/naa-amie-azure-clean/function_app.py`): performs novelty assessment after IDCA. Uses the IDCA synopsis/claims to search PatentsView, OpenAlex, and Semantic Scholar (`backend/naa-amie-azure-clean/prior_art_open.py`), scores novelty/§102 risk, and stores results to the same table.
 - **Docs**: architecture diagrams and sample manuscript PDFs in `docs/`.
 
 ## Quickstart (local)
@@ -33,12 +33,17 @@ MODEL_DEPLOYMENT=<your-model-deployment-name>
 IDCA_AGENT_ID=<agent-id>
 ```
 
-4) Run Functions locally (from `backend/ingestion-agent` or `backend/naa`):
+4) Run services locally (ensure venv is activated):
 ```bash
-func start
+start_services.ps1
 ```
 
-5) Run IDCA manually (CLI) after uploading a file:
+5) Stop services locally (ensure venv is activated):
+```bash
+stop_services.ps1
+```
+
+6) Run IDCA manually (CLI) after uploading a file:
 ```bash
 python backend/idca/idca.py
 # Enter request_id printed from the upload response

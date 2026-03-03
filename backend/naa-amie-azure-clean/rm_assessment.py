@@ -3,12 +3,12 @@ import io
 import json
 import logging
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 from azure.storage.blob import BlobServiceClient
-from backend.naa_brain_MVP.rm_retrieval import get_container_name
-from backend.naa_brain_MVP.naa_test import (
+from rm_retrieval import get_container_name
+from naa_test import (
     _chat,
     SSR_AGENT_ID,
     render_ssr_table,
@@ -163,6 +163,9 @@ Note:
 """
 
 
+# Cap RM assessments to stay within function timeout (~10 min with sequential LLM runs)
+MAX_RMS_TO_ASSESS = 5
+
 # ---------------------------------------------------------------------
 # MAIN ASSESSMENT FUNCTION
 # ---------------------------------------------------------------------
@@ -173,14 +176,18 @@ async def assess_all_rms(
     blob_service_client: BlobServiceClient,
     ssr: StructuralScoringRubric,
     ss_summary: str,
+    ordered_blob_names: Optional[List[str]] = None,
 ) -> List[RMAssessmentOutput]:
     """
-    1. List all blobs in {reqID}_RMs
+    1. List blobs in {reqID}_RMs (or use ordered_blob_names if provided = search order = best first)
     2. For each file (PDF or TXT):
        - Download & Extract Text
        - Run Assessment Agent (SSR_AGENT_ID)
        - Parse Result
     3. Return list of assessments
+
+    If ordered_blob_names is provided (from download_and_store_rms), we assess the first
+    MAX_RMS_TO_ASSESS in that order = the 5 best RMs from progressive search.
     """
     container_name = get_container_name(req_id)
     container_client = blob_service_client.get_container_client(container_name)
@@ -204,15 +211,23 @@ async def assess_all_rms(
     }
     ssr_json = json.dumps(ssr_dict, indent=2)
 
-    # Sync client list_blobs is not async
-    blobs = list(container_client.list_blobs())
+    # Use search order (best first) if we have it; else fall back to list_blobs order
+    if ordered_blob_names:
+        blob_names_to_process = ordered_blob_names[:MAX_RMS_TO_ASSESS]
+        if len(ordered_blob_names) > MAX_RMS_TO_ASSESS:
+            logging.info(
+                f"[RM-ASSESSMENT] Using top {MAX_RMS_TO_ASSESS} RMs in search order (total stored: {len(ordered_blob_names)})"
+            )
+    else:
+        blobs = list(container_client.list_blobs())
+        eligible = [b for b in blobs if b.name.endswith(".pdf") or b.name.endswith(".txt")]
+        blob_names_to_process = [b.name for b in eligible[:MAX_RMS_TO_ASSESS]]
+        if len(eligible) > MAX_RMS_TO_ASSESS:
+            logging.info(
+                f"[RM-ASSESSMENT] Capping at {MAX_RMS_TO_ASSESS} RMs (total eligible: {len(eligible)})"
+            )
 
-    for blob in blobs:
-        blob_name = blob.name
-        # Accept both .pdf and .txt files
-        if not (blob_name.endswith(".pdf") or blob_name.endswith(".txt")):
-            continue
-
+    for blob_name in blob_names_to_process:
         logging.info(f"\n[RM-ASSESSMENT] Processing: {blob_name}")
 
         try:

@@ -8,15 +8,11 @@ import io
 import asyncio
 import sys, pathlib
 
-# Ensure repository root is on path for backend.aa and backend.naa_brain_MVP imports
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]  # Go up to repo root
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from backend.naa_brain_MVP.naa_test import run_steps_8_to_12
-from backend.naa_brain_MVP.rm_retrieval import download_and_store_rms
-from backend.naa_brain_MVP.rm_assessment import assess_all_rms
+from naa_test import run_steps_8_to_12
+from rm_retrieval import download_and_store_rms
+from rm_assessment import assess_all_rms
 from prior_art_open import search_prior_art
+from dataclasses import asdict
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -27,9 +23,13 @@ INGESTION_TABLE = "IngestionRequests"
 
 # === LAZY STORAGE CLIENT HELPER ===
 def get_storage_clients():
-    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
+    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv(
+        "AzureWebJobsStorage"
+    )
     if not conn_str:
-        raise ValueError("Missing storage connection string (AZURE_STORAGE_CONNECTION_STRING or AzureWebJobsStorage)")
+        raise ValueError(
+            "Missing storage connection string (AZURE_STORAGE_CONNECTION_STRING or AzureWebJobsStorage)"
+        )
 
     # Import here to keep top-level light
     from azure.storage.blob import BlobServiceClient
@@ -86,8 +86,10 @@ def start_assessment(req: func.HttpRequest) -> func.HttpResponse:
         if entity.get("status") != "classified":
             return func.HttpResponse("IDCA must complete first", status_code=400)
 
-        entity["status"] = "analyzing"
-        ing_table.update_entity(entity)
+        ing_table.update_entity(
+            {"PartitionKey": "AMIE", "RowKey": request_id, "status": "analyzing"},
+            mode="merge",
+        )
 
         return func.HttpResponse(
             json.dumps({"request_id": request_id, "message": "NAA started"}),
@@ -150,7 +152,6 @@ def get_status(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # === POST /worker/run/{request_id} — RUN §102 ANALYSIS ===
-# === POST /worker/run/{request_id} — RUN §102 ANALYSIS ===
 @app.route(route="worker/run/{request_id}", methods=["POST"])
 async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
     """Full NAA pipeline (Steps 8–17) implemented via naa_brain_MVP modules."""
@@ -160,15 +161,59 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # ------------------------------------------------------------------
         # 0. Fetch ingestion record and verify state
         # ------------------------------------------------------------------
+        from azure.data.tables import TableClient
+        from azure.core import MatchConditions
+        from datetime import datetime
+
         blob_service, container_client, table_service = get_storage_clients()
         ing_table = table_service.get_table_client(INGESTION_TABLE)
-        entity = ing_table.get_entity("AMIE", request_id)
-        if entity.get("status") not in ("classified", "analyzing"):
-            return func.HttpResponse("IDCA not completed", status_code=400)
+        
+        # Idempotency check & job claiming
+        table_client = TableClient.from_connection_string(
+            os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage"), 
+            INGESTION_TABLE
+        )
+        
+        try:
+            entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
+            status = entity.get("status", "").lower()
+            
+            # If already processing or done, skip
+            if status != "classified":
+                logging.info(f"NAA cannot run from state '{status}'. Skipping.")
+                return func.HttpResponse(
+                    f"NAA cannot run from state '{status}'.",
+                    status_code=200
+                )
 
-        # Set status to analyzing at start
-        entity["status"] = "analyzing"
-        ing_table.update_entity(entity)
+            # Claim the job (with optimistic concurrency)
+            entity["status"] = "analyzing"
+            entity["naa_started_at"] = datetime.utcnow().isoformat()
+            
+            table_client.update_entity(
+                entity, 
+                mode='replace', 
+                etag=entity.metadata.get('etag'),
+                match_condition=MatchConditions.IfNotModified
+            )
+            logging.info(f"Successfully claimed NAA job for {request_id}")
+
+        except Exception as claim_err:
+            if "ConditionNotMet" in str(claim_err) or "UpdateConditionNotSatisfied" in str(claim_err):
+                logging.info(
+                    f"Race condition: NAA Request {request_id} was recently claimed. Skipping."
+                )
+                return func.HttpResponse(
+                    f"Request {request_id} already claimed.", status_code=200
+                )
+
+            logging.error(
+                f"Error checking/claiming NAA job for {request_id}: {claim_err}"
+            )
+            return func.HttpResponse(
+                "Failed to fetch or claim ingestion record.",
+                status_code=500
+            )          
 
         filename = entity["filename"]
         idca_output = json.loads(entity.get("idca_output", "{}"))
@@ -183,24 +228,26 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # ------------------------------------------------------------------
         # 2. Retrieve Reference Manuscripts (Step 13)
         # ------------------------------------------------------------------
+        stored_blob_names = []
         try:
-            # Fix: Await directly
-            await download_and_store_rms(request_id, naa_outputs.lor, blob_service)
+            stored_blob_names = await download_and_store_rms(
+                request_id, naa_outputs.lor, blob_service
+            )
         except Exception as e:
             logging.warning(f"RM retrieval failed: {e}")
 
         # ------------------------------------------------------------------
-        # 3. Assess RMs (Steps 14-17)
+        # 3. Assess RMs (Steps 14-17) — use stored_blob_names order = search order (best first)
         # ------------------------------------------------------------------
         assessments = None
         try:
             if naa_outputs.lor:
-                # Fix: Await directly
                 assessments = await assess_all_rms(
                     request_id,
                     blob_service,
                     naa_outputs.ssr,
                     naa_outputs.ss_synopsis,
+                    ordered_blob_names=stored_blob_names,
                 )
         except Exception as e:
             logging.warning(f"RM assessment failed: {e}")
@@ -209,12 +256,30 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # 4. Assemble NAA output JSON
         # ------------------------------------------------------------------
         
-        source_citation = idca_output.get("source_citation", "Unknown Citation")
+        # [NEW] Filter 'lor' to only include items that were successfully assessed
+        # We assume stored_blob_names order matches naa_outputs.lor order (since both come from download_and_store_rms/asyncio.gather)
+        filtered_lor = []
+        if assessments and stored_blob_names:
+            assessed_filenames = {a.filename for a in assessments}
+            
+            # stored_blob_names[i] corresponds to naa_outputs.lor[i]
+            # We iterate through them in parallel
+            if len(stored_blob_names) == len(naa_outputs.lor):
+                 for i, ref in enumerate(naa_outputs.lor):
+                     blob_name = stored_blob_names[i]
+                     if blob_name in assessed_filenames:
+                         filtered_lor.append(ref)
+            else:
+                logging.warning(f"Length mismatch: {len(stored_blob_names)} blobs vs {len(naa_outputs.lor)} refs. Skipping strict filtering.")
+                filtered_lor = naa_outputs.lor # Fallback to everything
 
         naa_output_json = {
             "ss_synopsis": naa_outputs.ss_synopsis,
-            "source_citation": source_citation,
-            "assessments": []
+            "ucs": naa_outputs.ucs,
+            "ss": asdict(naa_outputs.ss),
+            "ssr": asdict(naa_outputs.ssr),
+            "lor": filtered_lor if filtered_lor else naa_outputs.lor,
+            "source_citation": idca_output.get("source_citation", "Unknown"), # <--- PRESERVED FROM IDCA
         }
 
         if assessments:
@@ -232,48 +297,60 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
                 )
 
         # ------------------------------------------------------------------
-        # 5. Persist NAA results to Table Storage
+        # 5. Persist NAA results (Table Storage: max 32K chars per property — use blob if larger)
         # ------------------------------------------------------------------
-        entity.update(
-            {
-                "status": "naa_completed",  # Mark as ready for AA
-                "naa_output": json.dumps(naa_output_json),
+        naa_output_str = json.dumps(naa_output_json)
+        max_table_chars = 32 * 1024 - 256  # Azure limit 32K chars; leave margin
+
+        if len(naa_output_str) > max_table_chars:
+            blob_path = f"naa-outputs/{request_id}.json"
+            blob_client = container_client.get_blob_client(blob_path)
+            blob_client.upload_blob(naa_output_str.encode("utf-8"), overwrite=True)
+            patch = {
+                "PartitionKey": "AMIE",
+                "RowKey": request_id,
+                "status": "assessed",
+                "naa_output_blob": blob_path,
             }
-        )
-        ing_table.update_entity(entity)
+            logging.info(f"NAA output stored in blob ({len(naa_output_str)} chars): {blob_path}")
+        else:
+            patch = {
+                "PartitionKey": "AMIE",
+                "RowKey": request_id,
+                "status": "assessed",
+                "naa_output": naa_output_str,
+            }
+        ing_table.update_entity(patch, mode="merge")
         logging.info(f"NAA completed for {request_id}, triggering Aggregation Agent...")
 
         # ------------------------------------------------------------------
-        # 6. Trigger Aggregation Agent (via HTTP)
+        # 6. Call AA function app (SSOW Steps 18-19)
         # ------------------------------------------------------------------
         try:
             import httpx
-            
-            # Use environment variable for AA URL, default to local port 7074
-            aa_base_url = os.getenv("AA_SERVICE_URL", "http://localhost:7074/api")
-            aa_url = f"{aa_base_url}/aa/run/{request_id}"
-            
-            logging.info(f"[TRIGGER] Posting to AA Service at {aa_url}")
-            
-            # Fire and forget (or wait for confirmation of trigger, but AA is long running)
-            # Since AA is a function app, we generally want to wait for the response to know it started?
-            # actually AA runs synchronously in its function, so we might want to wait or use a durable pattern.
-            # For now, we await the POST response to ensure it started successfully.
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                 resp = await client.post(aa_url)
-                 resp.raise_for_status()
 
-            logging.info(f"[TRIGGER] Aggregation Agent triggered successfully for {request_id}")
-
+            aa_base = os.getenv("AA_BASE", "https://aa-func-habphsfdg5ejgtcy.westus2-01.azurewebsites.net/").rstrip("/")
+            key = os.getenv("AA_FUNCTION_KEY", "")
+            url = f"{aa_base}/api/aa/run/{request_id}"
+            if key:
+                url = f"{url}?code={key}"
+            r = httpx.post(url, timeout=120.0)
+            r.raise_for_status()
+            logging.info(f"Aggregation Agent completed for {request_id}")
         except Exception as aa_error:
-            logging.error(f"Failed to trigger Aggregation Agent for {request_id}: {aa_error}")
-            # We do NOT mark as completed. It stays as 'naa_completed' (or 'assessed').
-            # We could mark as failed_aa_trigger if we want.
-            entity = ing_table.get_entity("AMIE", request_id)
-            entity["aa_error"] = f"Trigger Failed: {str(aa_error)}"
-            ing_table.update_entity(entity)
+            logging.error(f"Aggregation Agent failed for {request_id}: {aa_error}")
+            # Still mark as assessed even if AA fails (merge so we don't re-send large props)
+            ing_table.update_entity(
+                {
+                    "PartitionKey": "AMIE",
+                    "RowKey": request_id,
+                    "status": "assessed",
+                    "aa_error": str(aa_error),
+                },
+                mode="merge",
+            )
 
-        return func.HttpResponse("NAA completed, AA triggered", status_code=200)
+        return func.HttpResponse("NAA complete; AA triggered", status_code=200)
     # --- end of function ---
 
     except Exception as exc:
@@ -281,10 +358,15 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         try:
             _, _, table_service = get_storage_clients()
             ing_table = table_service.get_table_client(INGESTION_TABLE)
-            entity = ing_table.get_entity("AMIE", request_id)
-            entity["status"] = "failed"
-            entity["error"] = str(exc)
-            ing_table.update_entity(entity)
+            ing_table.update_entity(
+                {
+                    "PartitionKey": "AMIE",
+                    "RowKey": request_id,
+                    "status": "failed",
+                    "error": str(exc)[:32000],  # table property max 32K chars
+                },
+                mode="merge",
+            )
         except Exception:
             pass
 

@@ -162,6 +162,35 @@ def list_requests(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(json.dumps(results, indent=2), mimetype="application/json")
 
 
+def _entity_to_response_dict(entity, blob_service=None):
+    """Build a JSON-serializable dict from a table entity; resolve blobs if stored there."""
+    result = dict(entity)
+
+    # Resolve NAA output
+    if result.get("naa_output_blob") and blob_service:
+        try:
+            container = blob_service.get_container_client(CONTAINER_NAME)
+            blob_client = container.get_blob_client(result["naa_output_blob"])
+            data = blob_client.download_blob().readall()
+            result["naa_output"] = data.decode("utf-8")
+        except Exception as e:
+            logging.warning(f"Could not load naa_output from blob: {e}")
+        result.pop("naa_output_blob", None)
+
+    # Resolve AA output
+    if result.get("aa_output_blob") and blob_service:
+        try:
+            container = blob_service.get_container_client(CONTAINER_NAME)
+            blob_client = container.get_blob_client(result["aa_output_blob"])
+            data = blob_client.download_blob().readall()
+            result["aa_output"] = data.decode("utf-8")
+        except Exception as e:
+            logging.warning(f"Could not load aa_output from blob: {e}")
+        result.pop("aa_output_blob", None)
+
+    return result
+
+
 # GET /requests/{request_id}
 @app.route(route="requests/{request_id}", methods=["GET"])
 def get_request(req: func.HttpRequest) -> func.HttpResponse:
@@ -171,7 +200,9 @@ def get_request(req: func.HttpRequest) -> func.HttpResponse:
     table_client = table_service.get_table_client(TABLE_NAME)
     try:
         entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
-        return func.HttpResponse(json.dumps(entity), mimetype="application/json")
+        blob_service = get_blob_service()
+        payload = _entity_to_response_dict(entity, blob_service)
+        return func.HttpResponse(json.dumps(payload), mimetype="application/json")
     except Exception:
         return func.HttpResponse("Request not found", status_code=404)
 

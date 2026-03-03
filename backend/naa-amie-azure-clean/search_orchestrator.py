@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from typing import List, Tuple
-from backend.naa_brain_MVP.search.prior_art_search import search_openalex
+from prior_art_search import search_openalex
 
 
 async def search_all_sources(query: str) -> List[dict]:
@@ -11,30 +11,42 @@ async def search_all_sources(query: str) -> List[dict]:
     Engines:
     - OpenAlex (academic papers)
     - PatentsView (patents)
+    - Semantic Scholar (academic papers)
 
     Note: Results are NOT deduplicated across sources to preserve
     paper vs patent separation (user requirement).
     """
     logging.info(f"Searching all sources for: {query[:50]}...")
 
-    # Import PatentsView search
-    from backend.naa_brain_MVP.search.prior_art_search import search_patentsview
+    # Import search functions
+    from prior_art_search import search_patentsview
+    from prior_art_search import search_semantic_scholar
 
-    # Dispatch to both engines in parallel
-    tasks = [search_openalex(query), search_patentsview(query)]
+    # Dispatch to all engines in parallel
+    tasks = [
+        search_openalex(query),
+        search_patentsview(query),
+        search_semantic_scholar(query),
+    ]
 
-    logging.info(f"Dispatching {len(tasks)} search tasks (OpenAlex + PatentsView)...")
+    logging.info(
+        f"Dispatching {len(tasks)} search tasks (OpenAlex + PatentsView + Semantic Scholar)..."
+    )
 
     # Run selected tasks asynchronously
     results_tuple = await asyncio.gather(*tasks, return_exceptions=True)
 
     combined = []
-    for res in results_tuple:
+    source_names = ["OpenAlex", "PatentsView", "Semantic Scholar"]
+    for i, res in enumerate(results_tuple):
+        name = source_names[i] if i < len(source_names) else f"Source_{i}"
         if isinstance(res, list):
             combined.extend(res)
+            logging.info(f"  {name}: {len(res)} results")
         else:
-            logging.error(f"Search engine error: {res}")
+            logging.error(f"  {name}: error — {res}")
 
+    logging.info(f"  Combined: {len(combined)} total prior-art results")
     return combined
 
 
@@ -110,7 +122,7 @@ async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List
     blocks = split_ucs(ucs)
 
     if len(blocks) <= 1:
-        print(" -> Only 1 block, cannot broaden further.")
+        print("  -> Only 1 block, cannot broaden further.")
         return ucs, LoR
 
     final_query = ucs
@@ -139,7 +151,7 @@ async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List
                 seen_ids.add(r["url"])
                 added_count += 1
 
-        print(f" -> Added {added_count} new. Total: {len(LoR)}")
+        print(f"  -> Added {added_count} new. Total: {len(LoR)}")
 
         # Update final_query to the last successful broadening
         if added_count > 0:

@@ -16,6 +16,9 @@ dist/
 *.log
 
 
+# cleaning file 
+cleanupthreads.py
+
 AzuriteConfig
 
 # Environment files (sensitive - contains API keys and secrets)
