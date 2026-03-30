@@ -110,16 +110,25 @@ def build_prompt(
     ss_synopsis = getattr(naa_output, "ss_synopsis", "Not available")
 
     # ---------------- CASE A – No Invention Present ----------------
-    if status != "present":
+    if status in ["absent", "implied"]:
         return f"""
-IDCA Output:
-Status: {status}
-Citation: {citation}
-Justification: {justification}
+Source Manuscript: {citation}
 
-No NAA output.
+IDCA Findings:
+- Status Determination: {status.capitalize()}
+- Justification: {justification}
 
-Please produce the 'No Invention Present' final report.
+No Source Structure was identified by the Invention Detection and Classification Agent (IDCA) because the manuscript does not disclose a concrete, useful technology.
+Consequently, no Novelty Assessment or prior art search was conducted.
+
+INSTRUCTIONS FOR FINAL REPORT:
+1. You are the Aggregation Agent (AA).
+2. Generate a Context Header substantially as follows:
+**AMIE Final Results**
+*Source Manuscript*: {citation}
+*Source Structure*: Not Applicable
+3. Below the header, write a 2-4 sentence summary for the user explaining that because the manuscript was determined to have an '{status.capitalize()}' status regarding invention disclosure, no further prior art analysis or comparison was performed. Use the IDCA justification provided above.
+4. Conclude with "**Novelty Verdict**: NOT APPLICABLE".
 """
 
     # ---------------- CASE B – Invention Present ----------------

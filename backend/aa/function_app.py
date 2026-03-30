@@ -65,10 +65,27 @@ def run_aa(req: func.HttpRequest) -> func.HttpResponse:
             entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
             status = entity.get("status", "").lower()
             
+            # Allow 'assessed' OR ('classified' AND no invention)
+            idca_output_str = entity.get("idca_output", "{}")
+            idca_output = {}
+            try:
+                if idca_output_str:
+                    idca_output = json.loads(idca_output_str)
+            except:
+                pass
+                
+            sd = idca_output.get("status_determination", "").lower()
+
+            can_run = False
+            if status == "assessed":
+                can_run = True
+            elif status == "classified" and sd in ["absent", "implied"]:
+                can_run = True
+
             # If already processing or done, skip
-            if status != "assessed":
+            if not can_run:
                 logging.info(
-                    f"AA cannot run from state '{status}'. Expected 'assessed'. Skipping."
+                    f"AA cannot run from state '{status}' with status_determination '{sd}'."
                 )
                 return func.HttpResponse(
                     f"AA cannot run from state '{status}'.",
