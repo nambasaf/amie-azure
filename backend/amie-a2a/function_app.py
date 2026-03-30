@@ -11,17 +11,12 @@ import re
 from azure.storage.blob import BlobServiceClient
 from azure.data.tables import TableServiceClient
 from azure.storage.queue import QueueClient, TextBase64EncodePolicy
-from azure.core.exceptions import ResourceExistsError
-from azure.storage.blob import generate_blob_sas, BlobSasPermissions
-from datetime import timedelta
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 CONTAINER_NAME = "manuscript-uploads"
 TABLE_NAME = "IngestionRequests"
 QUEUE_NAME = "idca-queue"
-STAGING_PREFIX = "a2a-staging"
-DEFAULT_UPLOAD_TTL_MINUTES = 15
 MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
 ALLOWED_CONTENT_TYPES = {
@@ -66,7 +61,7 @@ def _get_queue_client():
     )
     try:
         queue_client.create_queue()
-    except ResourceExistsError:
+    except Exception:
         pass
     return queue_client
 
@@ -122,11 +117,6 @@ def _guess_content_type(filename: str, mime_type: str | None = None) -> str:
     if guessed in ALLOWED_CONTENT_TYPES:
         return guessed
     return "application/pdf"
-
-
-def _build_staging_blob_name(request_id: str, filename: str) -> str:
-    safe_name = _sanitize_filename(filename)
-    return f"{STAGING_PREFIX}/{request_id}/{safe_name}"
 
 
 def _build_final_blob_name(request_id: str, filename: str, mime_type: str | None = None) -> str:
@@ -196,6 +186,10 @@ def _build_result_payload(entity: dict) -> dict:
             result["aa_output"] = _load_blob_text(
                 container_client, entity.get("aa_output_blob")
             )
+            
+        # Explicitly map the final AA output to a 'report' field for downstream agents
+        result["report"] = result["aa_output"]
+        
         if entity.get("error"):
             result["error"] = entity.get("error")
 
@@ -207,39 +201,27 @@ def get_agent_card(req: func.HttpRequest) -> func.HttpResponse:
     """Returns the A2A Agent Card."""
     card = {
         "name": "amie-agent",
-        "description": "Analyzes private manuscripts for invention disclosure, prior art, and final assessment. Manuscripts are uploaded privately to signed blob URLs and then processed asynchronously.",
+        "description": "Analyzes private manuscripts for invention disclosure, prior art, and final assessment. Manuscripts are uploaded directly as binary via the HTTP endpoint.",
         "protocol": "json-rpc-2.0",
         "version": "1.0",
         "endpoint": "/api/a2a",
         "capabilities": [
-            "manuscript_upload",
+            {
+                "name": "upload_manuscript",
+                "type": "http-upload",
+                "endpoint": "/api/upload",
+                "method": "POST",
+                "description": "Uploads a manuscript binary directly to the AMIE agent for analysis",
+                "headers": {
+                    "Content-Type": "application/octet-stream",
+                    "x-file-name": "string"
+                }
+            },
             "invention_detection",
             "novelty_assessment",
             "report_generation"
         ],  
         "methods": [
-            {
-                "name": "get_upload_url",
-                "description": "Request a short-lived signed upload URL for a private manuscript.",
-                "parameters": {
-                    "filename": "string (Optional: original file name. Defaults to manuscript.pdf)",
-                    "mime_type": "string (Optional: content type such as application/pdf)",
-                    "size_bytes": "number (Optional: expected file size in bytes)",
-                    "sha256": "string (Optional: checksum for client-side integrity)",
-                    "client_request_id": "string (Optional: caller correlation ID)",
-                },
-            },
-            {
-                "name": "submit_manuscript",
-                "description": "Finalize a previously uploaded manuscript and enqueue the AMIE pipeline.",
-                "parameters": {
-                    "request_id": "string (Required: ID returned from get_upload_url)",
-                    "filename": "string (Optional: original file name if different from the initial request)",
-                    "mime_type": "string (Optional: content type to validate)",
-                    "size_bytes": "number (Optional: expected blob size)",
-                    "sha256": "string (Optional: checksum supplied by caller)",
-                },
-            },
             {
                 "name": "get_status",
                 "description": "Check the status of a manuscript analysis.",
@@ -248,152 +230,6 @@ def get_agent_card(req: func.HttpRequest) -> func.HttpResponse:
         ],
     }
     return func.HttpResponse(json.dumps(card), mimetype="application/json", status_code=200)
-
-
-def _handle_get_upload_url(params: dict, rpc_id: str) -> func.HttpResponse:
-    request_id = str(uuid.uuid4())
-    requested_filename = _sanitize_filename(params.get("filename"))
-    mime_type = _guess_content_type(requested_filename, params.get("mime_type"))
-    size_bytes = params.get("size_bytes")
-    if size_bytes is not None and int(size_bytes) > MAX_UPLOAD_SIZE_BYTES:
-        return json_rpc_error(
-            -32602,
-            f"Requested file size exceeds limit of {MAX_UPLOAD_SIZE_BYTES} bytes.",
-            rpc_id,
-        )
-
-    blob_name = _build_staging_blob_name(request_id, requested_filename)
-    _get_container_client()
-
-    blob_service = _get_blob_service()
-    account_name = blob_service.account_name
-    account_key = blob_service.credential.account_key
-    expires_at = datetime.datetime.utcnow() + timedelta(
-        minutes=DEFAULT_UPLOAD_TTL_MINUTES
-    )
-
-    sas_token = generate_blob_sas(
-        account_name=account_name,
-        container_name=CONTAINER_NAME,
-        blob_name=blob_name,
-        account_key=account_key,
-        permission=BlobSasPermissions(create=True, write=True),
-        expiry=expires_at,
-    )
-
-    upload_url = (
-        f"https://{account_name}.blob.core.windows.net/"
-        f"{CONTAINER_NAME}/{blob_name}?{sas_token}"
-    )
-
-    result = {
-        "request_id": request_id,
-        "upload_url": upload_url,
-        "blob_path": blob_name,
-        "expires_at": expires_at.replace(microsecond=0).isoformat() + "Z",
-        "max_size_bytes": MAX_UPLOAD_SIZE_BYTES,
-        "required_headers": {
-            "x-ms-blob-type": "BlockBlob",
-            "Content-Type": mime_type,
-        },
-        "allowed_content_types": sorted(ALLOWED_CONTENT_TYPES),
-        "allowed_extensions": sorted(ALLOWED_EXTENSIONS),
-        "submit_after_upload": True,
-    }
-    return json_rpc_success(result, rpc_id)
-
-
-def _handle_submit(params: dict, rpc_id: str) -> func.HttpResponse:
-    request_id = params.get("request_id")
-    if not request_id:
-        return json_rpc_error(
-            -32602,
-            "submit_manuscript requires 'request_id' from get_upload_url",
-            rpc_id,
-        )
-
-    requested_filename = _sanitize_filename(params.get("filename"))
-    mime_type = _guess_content_type(requested_filename, params.get("mime_type"))
-    expected_size = params.get("size_bytes")
-    expected_sha = params.get("sha256")
-    staging_blob_name = _build_staging_blob_name(request_id, requested_filename)
-    final_blob_name = _build_final_blob_name(request_id, requested_filename, mime_type)
-
-    container_client = _get_container_client()
-    staging_blob_client = container_client.get_blob_client(staging_blob_name)
-    table_client = _get_table_client()
-
-    if not staging_blob_client.exists():
-        return json_rpc_error(
-            -32602,
-            "Uploaded blob not found. Call get_upload_url, upload the manuscript, then retry submit_manuscript.",
-            rpc_id,
-        )
-
-    try:
-        blob_props = staging_blob_client.get_blob_properties()
-    except Exception as exc:
-        logging.error(f"Failed to read staged blob properties: {exc}")
-        return json_rpc_error(-32603, "Failed to inspect staged manuscript.", rpc_id)
-
-    if expected_size is not None and blob_props.size != int(expected_size):
-        return json_rpc_error(
-            -32602,
-            f"Uploaded blob size mismatch. Expected {expected_size}, found {blob_props.size}.",
-            rpc_id,
-        )
-
-    actual_sha = blob_props.metadata.get("sha256") if blob_props.metadata else None
-    if expected_sha and actual_sha and expected_sha != actual_sha:
-        return json_rpc_error(-32602, "Uploaded blob checksum mismatch.", rpc_id)
-
-    final_blob_client = container_client.get_blob_client(final_blob_name)
-    try:
-        final_blob_client.start_copy_from_url(staging_blob_client.url)
-        final_blob_client.set_http_headers(content_settings=blob_props.content_settings)
-    except Exception as exc:
-        logging.error(f"Failed to finalize staged manuscript: {exc}")
-        return json_rpc_error(-32603, "Failed to finalize uploaded manuscript.", rpc_id)
-
-    entity = {
-        "PartitionKey": "AMIE",
-        "RowKey": request_id,
-        "filename": final_blob_name,
-        "status": "queued",
-        "uploaded_at": datetime.datetime.utcnow().isoformat(),
-        "a2a_original_filename": requested_filename,
-        "a2a_blob_path": final_blob_name,
-        "a2a_staging_blob_path": staging_blob_name,
-        "a2a_content_type": mime_type,
-        "analysis_started_at": None,
-        "pipeline_version": "1.0",
-    }
-    if expected_size is not None:
-        entity["a2a_size_bytes"] = int(expected_size)
-    if expected_sha:
-        entity["a2a_sha256"] = expected_sha
-
-    try:
-        table_client.create_entity(entity=entity)
-    except Exception as exc:
-        logging.error(f"Failed to create table entity: {exc}")
-        return json_rpc_error(-32603, "Failed to save request metadata.", rpc_id)
-
-    try:
-        _get_queue_client().send_message(request_id)
-    except Exception as exc:
-        logging.error(f"Failed to enqueue job: {exc}")
-        return json_rpc_error(-32603, "Failed to start processing pipeline.", rpc_id)
-
-    result = {
-        "request_id": request_id,
-        "status": "queued",
-        "normalized_status": "queued",
-        "filename": final_blob_name,
-        "estimated_processing": "2-5 minutes",
-        "next_step": "Call get_status to retrieve results"
-    }
-    return json_rpc_success(result, rpc_id)
 
 
 def _handle_get_status(params: dict, rpc_id: str) -> func.HttpResponse:
@@ -433,10 +269,76 @@ def a2a_rpc(req: func.HttpRequest) -> func.HttpResponse:
     if not isinstance(params, dict):
         return json_rpc_error(-32602, "Invalid params: expected an object", rpc_id)
 
-    if method == "get_upload_url":
-        return _handle_get_upload_url(params, rpc_id)
-    if method == "submit_manuscript":
-        return _handle_submit(params, rpc_id)
     if method == "get_status":
         return _handle_get_status(params, rpc_id)
     return json_rpc_error(-32601, f"Method '{method}' not found", rpc_id)
+
+@app.route(route="upload", methods=["POST"])
+def upload_manuscript(req: func.HttpRequest) -> func.HttpResponse:
+    # Read binary bytes
+    file_bytes = req.get_body()
+    
+    # 2. Add validation for file size
+    if len(file_bytes) > MAX_UPLOAD_SIZE_BYTES:
+        return func.HttpResponse(
+            "File exceeds maximum allowed size", 
+            status_code=400
+        )
+
+    if not file_bytes:
+        return func.HttpResponse("No file uploaded", status_code=400)
+
+    # Obtain requested filename from header
+    raw_filename = req.headers.get("x-file-name", "manuscript.pdf")
+    mime_type = req.headers.get("Content-Type", "application/octet-stream")
+
+    request_id = str(uuid.uuid4())
+    filename = _sanitize_filename(raw_filename)
+
+    # Retain final blob naming logic
+    blob_name = _build_final_blob_name(request_id, filename, mime_type)
+
+    try:
+        container = _get_container_client()
+        blob_client = container.get_blob_client(blob_name)
+        blob_client.upload_blob(file_bytes, overwrite=True)
+    except Exception as exc:
+        logging.error(f"Failed to upload blob for {request_id}: {exc}")
+        return func.HttpResponse("Failed to upload manuscript to storage", status_code=500)
+
+    try:
+        table_client = _get_table_client()
+        entity = {
+            "PartitionKey": "AMIE",
+            "RowKey": request_id,
+            "filename": blob_name,
+            "status": "queued",
+            "uploaded_at": datetime.datetime.utcnow().isoformat(),
+            "a2a_original_filename": raw_filename,
+            "a2a_blob_path": blob_name,
+            "a2a_content_type": mime_type,
+            "a2a_size_bytes": len(file_bytes),
+            "analysis_started_at": None,
+            "pipeline_version": "1.0",
+        }
+        table_client.create_entity(entity)
+    except Exception as exc:
+        logging.error(f"Failed to create table entity for {request_id}: {exc}")
+        return func.HttpResponse("Failed to create tracking record", status_code=500)
+
+    try:
+        _get_queue_client().send_message(request_id)
+    except Exception as exc:
+        logging.error(f"Failed to trigger pipeline queue for {request_id}: {exc}")
+        return func.HttpResponse("Failed to trigger analysis pipeline", status_code=500)
+
+    return func.HttpResponse(
+        json.dumps({
+            "request_id": request_id,
+            "status": "queued"
+        }),
+        mimetype="application/json",
+        status_code=202
+    )
+
+

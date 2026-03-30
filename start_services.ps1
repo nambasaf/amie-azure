@@ -27,6 +27,10 @@ Write-Host "[4/5] Starting AA on port 7074..." -ForegroundColor Green
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$PSScriptRoot\backend\aa'; func start --port 7074 --cors http://localhost:5173"
 #>
 
+# Start A2A Gateway (Port 7075)
+Write-Host "[5/5] Starting A2A Gateway on port 7075..." -ForegroundColor Green
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$PSScriptRoot\backend\amie-a2a'; .\.venv\Scripts\Activate.ps1; func start --port 7075"
+
 # Start Frontend (Vite)
 Write-Host "Starting Frontend on port 5173..." -ForegroundColor Green
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$PSScriptRoot\frontend'; npm run dev"
