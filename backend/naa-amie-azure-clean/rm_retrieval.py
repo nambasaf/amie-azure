@@ -192,29 +192,37 @@ def schedule_cleanup(container_name: str, blob_service_client: BlobServiceClient
     t.start()
     logging.info(f"[RM-LIFECYCLE] Cleanup scheduled for {container_name} in {delay_seconds} seconds.")
 
-async def process_single_rm(rm: Dict[str, Any], container_client, api_key: str = None) -> str:
-    """Downloads one RM (paper or patent) and uploads it to the container."""
+async def process_single_rm(rm: Dict[str, Any], container_client, api_key: str = None) -> Dict[str, Any]:
+    """
+    Downloads one RM (paper or patent) and uploads it to the container.
+    Returns a status record.
+    """
     url = rm.get("url")
     title = rm.get("title", "untitled")
     source = rm.get("source", "Unknown")
     
+    record = {
+        "rm_data": rm,
+        "blob_name": None,
+        "stored": False,
+        "error": None
+    }
+
     if not url:
-        return None
+        record["error"] = "No URL provided"
+        return record
 
     try:
         blob_name = f"{sanitize_name(title)}_{int(time.time())}"
         
         # Branch based on source type
         if source == "PatentsView":
-            # Extract patent ID from URL or rm dict
-            patent_id = rm.get("id")
+            patent_id = rm.get("id") or rm.get("patent_id")
             if not patent_id:
-                logging.warning(f"No patent ID for '{title}'")
-                return None
+                raise ValueError("No patent ID found")
             
             if not api_key:
-                logging.error("PATENTS_VIEW_KEY required for patent retrieval")
-                return None
+                raise ValueError("PATENTS_VIEW_KEY required for patent retrieval")
             
             # Retrieve patent text
             logging.info(f"Retrieving patent text for {patent_id}...")
@@ -236,19 +244,24 @@ async def process_single_rm(rm: Dict[str, Any], container_client, api_key: str =
             blob_client.upload_blob(content, overwrite=True)
             logging.info(f"Stored PDF: {blob_name} ({len(content)} bytes)")
         
-        return blob_name
+        record["blob_name"] = blob_name
+        record["stored"] = True
+        return record
         
     except Exception as e:
-        logging.warning(f"Failed to process RM '{title}': {str(e)}")
-        return None
+        err_msg = f"Failed to process RM '{title}': {str(e)}"
+        logging.warning(err_msg)
+        record["error"] = err_msg
+        return record
 
-async def download_and_store_rms(req_id: str, lor: List[Dict[str, Any]], blob_service_client: BlobServiceClient):
+async def download_and_store_rms(req_id: str, lor: List[Dict[str, Any]], blob_service_client: BlobServiceClient) -> List[Dict[str, Any]]:
     """
     Main entry point:
     1. Creates container reqID_RMs
     2. Downloads docs from LoR (PDFs for papers, text for patents)
     3. Stores them
-    4. Schedules cleanup
+    4. Returns list of structured records
+    5. Schedules cleanup
     """
     import os
     
@@ -270,14 +283,14 @@ async def download_and_store_rms(req_id: str, lor: List[Dict[str, Any]], blob_se
     for rm in lor:
         tasks.append(process_single_rm(rm, container_client, api_key))
         
-    stored_blobs = await asyncio.gather(*tasks)
+    # We await all tasks so we have a 1-to-1 mapping in the results list
+    retrieval_results = await asyncio.gather(*tasks)
     
-    # Filter Nones
-    stored_blobs = [b for b in stored_blobs if b]
-    
-    logging.info(f"[RM-RETRIEVAL] Successfully stored {len(stored_blobs)}/{len(lor)} references.")
+    # Summary
+    stored_count = sum(1 for r in retrieval_results if r["stored"])
+    logging.info(f"[RM-RETRIEVAL] Successfully stored {stored_count}/{len(lor)} references.")
     
     # 3. Schedule Cleanup (15 mins = 900s)
     schedule_cleanup(container_name, blob_service_client, delay_seconds=900)
     
-    return stored_blobs
+    return retrieval_results

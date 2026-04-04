@@ -219,76 +219,97 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         idca_output = json.loads(entity.get("idca_output", "{}"))
 
         # ------------------------------------------------------------------
-        # 1. Run full NAA pipeline (Steps 8-12)
+        # 1. Run NAA Brain (Steps 8-12)
         # ------------------------------------------------------------------
         manuscript_text = get_manuscript_text(filename)
-        # Fix: Await the async pipeline
         naa_outputs = await run_steps_8_to_12(manuscript_text, idca_output)
 
         # ------------------------------------------------------------------
-        # 2. Retrieve Reference Manuscripts (Step 13)
+        # 2. Retrieve Reference Manuscripts (Step 13) - Now Structured
         # ------------------------------------------------------------------
-        stored_blob_names = []
+        retrieval_records = []
         try:
-            stored_blob_names = await download_and_store_rms(
-                request_id, naa_outputs.lor, blob_service
-            )
+            if naa_outputs.lor:
+                retrieval_records = await download_and_store_rms(
+                    request_id, naa_outputs.lor, blob_service
+                )
         except Exception as e:
             logging.warning(f"RM retrieval failed: {e}")
 
         # ------------------------------------------------------------------
-        # 3. Assess RMs (Steps 14-17) — use stored_blob_names order = search order (best first)
+        # 3. Assess RMs (Steps 14-17) - Now Parallel & Structured
         # ------------------------------------------------------------------
-        assessments = None
+        final_records = retrieval_records
         try:
-            if naa_outputs.lor:
-                assessments = await assess_all_rms(
+            if retrieval_records:
+                final_records = await assess_all_rms(
                     request_id,
                     blob_service,
                     naa_outputs.ssr,
                     naa_outputs.ss_synopsis,
-                    ordered_blob_names=stored_blob_names,
+                    retrieval_records=retrieval_records,
                 )
         except Exception as e:
-            logging.warning(f"RM assessment failed: {e}")
+            logging.warning(f"RM assessment pipeline failed: {e}")
 
         # ------------------------------------------------------------------
-        # 4. Assemble NAA output JSON
+        # 4. Assemble NAA output JSON & Metadata
         # ------------------------------------------------------------------
         
-        # [NEW] Filter 'lor' to only include items that were successfully assessed
-        # We assume stored_blob_names order matches naa_outputs.lor order (since both come from download_and_store_rms/asyncio.gather)
-        filtered_lor = []
-        if assessments and stored_blob_names:
-            assessed_filenames = {a.filename for a in assessments}
-            
-            # stored_blob_names[i] corresponds to naa_outputs.lor[i]
-            # We iterate through them in parallel
-            if len(stored_blob_names) == len(naa_outputs.lor):
-                 for i, ref in enumerate(naa_outputs.lor):
-                     blob_name = stored_blob_names[i]
-                     if blob_name in assessed_filenames:
-                         filtered_lor.append(ref)
-            else:
-                logging.warning(f"Length mismatch: {len(stored_blob_names)} blobs vs {len(naa_outputs.lor)} refs. Skipping strict filtering.")
-                filtered_lor = naa_outputs.lor # Fallback to everything
+        # Calculate Metadata
+        total_found = naa_outputs.total_found
+        total_stored = sum(1 for r in final_records if r.get("stored"))
+        total_assessed = sum(1 for r in final_records if r.get("assessed"))
+        failed_downloads = sum(1 for r in final_records if not r.get("stored"))
+        failed_assessments = sum(1 for r in final_records if r.get("stored") and not r.get("assessed"))
+
+        # Prepare assessments list for the Aggregation Agent (AA)
+        # AA expects a list of dicts with: reference_citation, rs_synopsis, sos_score{css, ewss}
+        aa_assessments = []
+        for r in final_records:
+            if r.get("assessed") and r.get("assessment"):
+                data = r["assessment"]
+                aa_assessments.append({
+                    "filename": r.get("blob_name"),
+                    "reference_citation": data.get("reference_citation", "Unknown"),
+                    "rs_synopsis": data.get("rs_synopsis", ""),
+                    "sos_score": {
+                        "css": data.get("css", 0.0),
+                        "ewss": data.get("ewss", 0.0),
+                        "details": data.get("ss_match_scores", []),
+                    },
+                    "status_determination": data.get("novelty_status", "Unknown"),
+                })
 
         naa_output_json = {
             "ss_synopsis": naa_outputs.ss_synopsis,
             "ucs": naa_outputs.ucs,
             "ss": asdict(naa_outputs.ss),
             "ssr": asdict(naa_outputs.ssr),
-            "lor": filtered_lor if filtered_lor else naa_outputs.lor,
-            "source_citation": idca_output.get("source_citation", "Unknown"), # <--- PRESERVED FROM IDCA
+            "lor": [r.get("rm_data") for r in final_records], # Original LoR data
+            "full_records": final_records, # [NEW] All metadata for traceability
+            "source_citation": idca_output.get("source_citation", "Unknown"),
+            "metadata": {
+                "total_found": total_found,
+                "total_stored": total_stored,
+                "total_assessed": total_assessed,
+                "failed_downloads": failed_downloads,
+                "failed_assessments": failed_assessments,
+                "pipeline_version": "2.0-async"
+            }
         }
-        if assessments:
-            naa_output_json["assessments"] = [a.__dict__ for a in assessments]
+
+        # Add Low Coverage Warning
+        if total_assessed < 5:
+            naa_output_json["warning"] = "Low assessment coverage — results may be unreliable"
+        if aa_assessments:
+            naa_output_json["assessments"] = aa_assessments
 
         # ------------------------------------------------------------------
-        # 5. Persist NAA results (Table Storage: max 32K chars per property — use blob if larger)
+        # 5. Persist NAA results
         # ------------------------------------------------------------------
         naa_output_str = json.dumps(naa_output_json)
-        max_table_chars = 32 * 1024 - 256  # Azure limit 32K chars; leave margin
+        max_table_chars = 32 * 1024 - 256  # Azure limit 32K chars
 
         if len(naa_output_str) > max_table_chars:
             blob_path = f"naa-outputs/{request_id}.json"
@@ -300,7 +321,6 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
                 "status": "assessed",
                 "naa_output_blob": blob_path,
             }
-            logging.info(f"NAA output stored in blob ({len(naa_output_str)} chars): {blob_path}")
         else:
             patch = {
                 "PartitionKey": "AMIE",

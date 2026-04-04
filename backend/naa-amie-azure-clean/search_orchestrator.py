@@ -85,15 +85,14 @@ def split_ucs(ucs: str) -> List[str]:
     return blocks
 
 
-async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List[dict]]:
+async def progressive_search(ucs: str, target_total: int = 250) -> Tuple[str, List[dict]]:
     """
     Orchestrates the Progressive Search algorithm across ALL engines.
 
-    Strategy:
-    1. Try full UCS first.
-    2. If results < target, remove ONE top-level AND block at a time (preserving order).
-    3. Accumulate unique results across all attempts.
-    4. Stop when target is reached or all blocks tested.
+    Logic:
+    1. IF N == 0 (full query): broaden search by removing blocks.
+    2. IF 0 < N <= 250: return all results.
+    3. IF N > 250: truncate to the top 250 (preserves ranking).
     """
     print("\n===== PARALLEL PROGRESSIVE SEARCH ENGINE =====\n")
 
@@ -114,11 +113,21 @@ async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List
 
     print(f"  -> Found {len(LoR)} unique results.")
 
-    if len(LoR) >= target_total:
+    # Rule: IF N > 0, we have results. We only broaden if N == 0.
+    # However, the user also mentioned "assess ALL if <= 250", and "truncate if > 250".
+    # If we have SOME results (e.g., 2), should we still broaden? 
+    # Usually, progressive search broadens if results < target. 
+    # But the user's prompt specifically says "IF N == 0: broaden search".
+    
+    if len(LoR) > 0:
+        # Already have some results. Check if we need to truncate.
+        if len(LoR) > target_total:
+            print(f"  -> Truncating {len(LoR)} results to top {target_total}.")
+            LoR = LoR[:target_total]
         return ucs, LoR
 
-    # 2. Ablation - Remove ONE block at a time
-    print("\n[BROADENING SEARCH] Removing blocks one at a time...")
+    # 2. Broaden (only if N == 0)
+    print("\n[BROADENING SEARCH] No results found. Removing blocks one at a time...")
     blocks = split_ucs(ucs)
 
     if len(blocks) <= 1:
@@ -129,10 +138,6 @@ async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List
 
     # Test removing each block individually (in order)
     for i in range(len(blocks)):
-        # Skip if we already have enough
-        if len(LoR) >= target_total:
-            break
-
         # Construct query with block i removed
         remaining_blocks = blocks[:i] + blocks[i + 1 :]
         if not remaining_blocks:
@@ -153,8 +158,15 @@ async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List
 
         print(f"  -> Added {added_count} new. Total: {len(LoR)}")
 
-        # Update final_query to the last successful broadening
         if added_count > 0:
             final_query = query
+            # If we found anything during broadening, we stop broadening further in this simple loop
+            # and check if we need to truncate the newly accumulated LoR
+            break 
+
+    # Final Truncation check for broadened results
+    if len(LoR) > target_total:
+        print(f"  -> Truncating {len(LoR)} results to top {target_total}.")
+        LoR = LoR[:target_total]
 
     return final_query, LoR

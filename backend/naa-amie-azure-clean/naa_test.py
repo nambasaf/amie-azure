@@ -146,7 +146,11 @@ class NAAOutputs:
     ssr: StructuralScoringRubric
     ss_synopsis: str
     ucs: str
-    lor: List[Dict[str, Any]] = field(default_factory=list)  # [NEW] Add LoR field
+    lor: List[Dict[str, Any]] = field(default_factory=list)  # Stays as LoR but will be structured records
+    total_found: int = 0
+    total_stored: int = 0
+    total_assessed: int = 0
+    failed_assessments: int = 0
 
 
 # ---------------------------------------------------------------------
@@ -432,7 +436,8 @@ async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutput
 
     try:
         # Run async search directly
-        final_query, LoR = await parallel_progressive_search(search_query, target_total=5)
+        search_target = int(os.getenv("SEARCH_TARGET", 250))
+        final_query, LoR = await parallel_progressive_search(search_query, target_total=search_target)
 
         logging.info("\n[STEP 12 OUTPUT]")
         logging.info(f" PRIOR ART QUERY: {final_query if final_query else '(none)'}")
@@ -457,4 +462,11 @@ async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutput
         logging.error(traceback.format_exc())
         final_query, LoR = None, []
 
-    return NAAOutputs(ss=ss, ssr=ssr, ss_synopsis=synopsis, ucs=ucs, lor=LoR)
+    return NAAOutputs(
+        ss=ss, 
+        ssr=ssr, 
+        ss_synopsis=synopsis, 
+        ucs=ucs, 
+        lor=LoR or [],
+        total_found=len(LoR) if LoR else 0
+    )

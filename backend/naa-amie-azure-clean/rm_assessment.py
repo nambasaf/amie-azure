@@ -163,40 +163,124 @@ Note:
 """
 
 
-# Cap RM assessments to stay within function timeout (~10 min with sequential LLM runs)
-MAX_RMS_TO_ASSESS = 5
+import time
+import random
+
+# ---------------------------------------------------------------------
+# ASYNC RETRY HELPER
+# ---------------------------------------------------------------------
+async def async_retry_agent(coro_fn, agent_name: str, max_attempts: int = 3):
+    """
+    Async retry wrapper with exponential backoff and jitter.
+    """
+    last_exception = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Check if coro_fn is a coroutine object or a function that returns one
+            if asyncio.iscoroutine(coro_fn):
+                return await coro_fn
+            else:
+                return await coro_fn()
+        except Exception as e:
+            last_exception = e
+            logging.warning(f"[RETRY] {agent_name} failed (Attempt {attempt}/{max_attempts}): {e}")
+            if attempt < max_attempts:
+                sleep_time = (2 ** attempt) + (random.uniform(0, 1))
+                await asyncio.sleep(sleep_time)
+            else:
+                logging.error(f"[RETRY] {agent_name} exhausted all {max_attempts} attempts.")
+    raise last_exception
+
+# ---------------------------------------------------------------------
+# SINGLE RM ASSESSMENT (SAFE WRAPPER)
+# ---------------------------------------------------------------------
+async def assess_single_rm(
+    sem: asyncio.Semaphore,
+    record: Dict[str, Any],
+    container_client,
+    ssr_json: str,
+    ss_summary: str
+) -> Dict[str, Any]:
+    """
+    Wraps the assessment logic for a single RM with concurrency control and retries.
+    Updates the record in-place.
+    """
+    blob_name = record.get("blob_name")
+    if not record.get("stored") or not blob_name:
+        # Skip records that weren't stored
+        return record
+
+    async with sem:
+        logging.info(f"[RM-ASSESSMENT] Starting: {blob_name}")
+        try:
+            # 1. Download
+            blob_client = container_client.get_blob_client(blob_name)
+            content = blob_client.download_blob().readall()
+
+            # 2. Extract Text
+            text = extract_text_from_file(content, blob_name)
+            if len(text) < 500:
+                record["error"] = f"Text too short ({len(text)} chars). Skipping."
+                return record
+
+            # 3. Assess with Retries
+            prompt = generate_assessment_prompt(text, ssr_json=ssr_json, ss_summary=ss_summary)
+            
+            # Note: _chat is sync in naa_test.py. We need to run it in a thread if we want true async, 
+            # or wrap it if it's already async. In naa_test.py it looks sync.
+            # For now, let's wrap the sync _chat in to_thread.
+            
+            async def _do_chat():
+                return await asyncio.to_thread(_chat, SSR_AGENT_ID, prompt)
+
+            response_json_str = await async_retry_agent(_do_chat, f"SSR Agent ({blob_name})")
+            
+            # 4. Parse
+            data = json.loads(response_json_str)
+            
+            # Update record
+            record["assessed"] = True
+            record["assessment"] = data
+            record["status_determination"] = data.get("novelty_status", "Unknown")
+            record["ewss"] = data.get("ewss", 0.0)
+            
+            logging.info(f"  -> Analyzed {blob_name}. Status: {record['status_determination']} (EWSS: {record['ewss']})")
+
+        except Exception as e:
+            err_msg = f"Assessment failed for {blob_name}: {str(e)}"
+            logging.error(err_msg)
+            record["assessed"] = False
+            record["error"] = err_msg
+
+    return record
 
 # ---------------------------------------------------------------------
 # MAIN ASSESSMENT FUNCTION
 # ---------------------------------------------------------------------
-
 
 async def assess_all_rms(
     req_id: str,
     blob_service_client: BlobServiceClient,
     ssr: StructuralScoringRubric,
     ss_summary: str,
-    ordered_blob_names: Optional[List[str]] = None,
-) -> List[RMAssessmentOutput]:
+    retrieval_records: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     """
-    1. List blobs in {reqID}_RMs (or use ordered_blob_names if provided = search order = best first)
-    2. For each file (PDF or TXT):
-       - Download & Extract Text
-       - Run Assessment Agent (SSR_AGENT_ID)
-       - Parse Result
-    3. Return list of assessments
+    1. Filter retrieval_records to those that were successfully stored.
+    2. Capping at MAX_RMS_TO_ASSESS (env) or 250.
+    3. Run parallel assessments with Semaphore.
+    4. Return original records list (updated).
+    """
+    max_to_assess = int(os.getenv("MAX_RMS_TO_ASSESS", 250))
+    max_concurrent = int(os.getenv("MAX_CONCURRENT_ASSESSMENTS", 10))
+    sem = asyncio.Semaphore(max_concurrent)
 
-    If ordered_blob_names is provided (from download_and_store_rms), we assess the first
-    MAX_RMS_TO_ASSESS in that order = the 5 best RMs from progressive search.
-    """
     container_name = get_container_name(req_id)
     container_client = blob_service_client.get_container_client(container_name)
 
     if not container_client.exists():
         logging.warning(f"Container {container_name} not found. Skipping assessment.")
-        return []
-
-    assessments = []
+        return retrieval_records
 
     # Convert SSR to JSON string for prompt
     ssr_dict = {
@@ -211,70 +295,28 @@ async def assess_all_rms(
     }
     ssr_json = json.dumps(ssr_dict, indent=2)
 
-    # Use search order (best first) if we have it; else fall back to list_blobs order
-    if ordered_blob_names:
-        blob_names_to_process = ordered_blob_names[:MAX_RMS_TO_ASSESS]
-        if len(ordered_blob_names) > MAX_RMS_TO_ASSESS:
-            logging.info(
-                f"[RM-ASSESSMENT] Using top {MAX_RMS_TO_ASSESS} RMs in search order (total stored: {len(ordered_blob_names)})"
-            )
+    # 1. First, filter only valid stored records to prioritize them
+    stored_records = [r for r in retrieval_records if r.get("stored")]
+    
+    # 2. Apply the cap (e.g., top 250 of successfully stored records)
+    if len(stored_records) > max_to_assess:
+        logging.info(f"[RM-ASSESSMENT] Truncating stored records from {len(stored_records)} to {max_to_assess}")
+        task_records = stored_records[:max_to_assess]
     else:
-        blobs = list(container_client.list_blobs())
-        eligible = [b for b in blobs if b.name.endswith(".pdf") or b.name.endswith(".txt")]
-        blob_names_to_process = [b.name for b in eligible[:MAX_RMS_TO_ASSESS]]
-        if len(eligible) > MAX_RMS_TO_ASSESS:
-            logging.info(
-                f"[RM-ASSESSMENT] Capping at {MAX_RMS_TO_ASSESS} RMs (total eligible: {len(eligible)})"
-            )
+        task_records = stored_records
 
-    for blob_name in blob_names_to_process:
-        logging.info(f"\n[RM-ASSESSMENT] Processing: {blob_name}")
+    # Prepare tasks
+    tasks = []
+    for record in task_records:
+        # Initialize assessment fields
+        record["assessed"] = False
+        record["assessment"] = None
+        tasks.append(assess_single_rm(sem, record, container_client, ssr_json, ss_summary))
 
-        try:
-            # 1. Download (Sync)
-            blob_client = container_client.get_blob_client(blob_name)
-            content = blob_client.download_blob().readall()
+    if tasks:
+        logging.info(f"[RM-ASSESSMENT] Dispatching {len(tasks)} parallel assessments (Concurrency: {max_concurrent})...")
+        await asyncio.gather(*tasks)
 
-            # 2. Extract Text (handles both PDF and TXT)
-            text = extract_text_from_file(content, blob_name)
-            if len(text) < 500:
-                logging.warning(
-                    f"Text too short ({len(text)} chars). Skipping LLM assessment."
-                )
-                continue
-
-            # 3. Assess (Synchronous call to _chat inside async loop - blocked but ok for MVP)
-            prompt = generate_assessment_prompt(text, ssr_json, ss_summary)
-
-            response_json_str = _chat(SSR_AGENT_ID, prompt)
-
-            # 4. Parse
-            try:
-                data = json.loads(response_json_str)
-
-                # Create Output Object
-                assessment = RMAssessmentOutput(
-                    filename=blob_name,
-                    reference_citation=data.get("reference_citation", "Unknown"),
-                    rs_synopsis=data.get("rs_synopsis", ""),
-                    sos_score={
-                        "css": data.get("css", 0.0),
-                        "ewss": data.get("ewss", 0.0),
-                        "details": data.get("ss_match_scores", []),
-                    },
-                    status_determination=data.get("novelty_status", "Unknown"),
-                )
-                assessments.append(assessment)
-
-                print(
-                    f"  -> Analyzed. Status: {assessment.status_determination} (EWSS: {assessment.sos_score['ewss']})"
-                )
-
-            except json.JSONDecodeError:
-                logging.error(f"Failed to parse JSON response for {blob_name}")
-                logging.debug(f"Raw response: {response_json_str}")
-
-        except Exception as e:
-            logging.error(f"Error checking {blob_name}: {e}")
-
-    return assessments
+    # The retrieval_records list has been updated in-place (or we return the task_records slice if we want)
+    # To be safe and preserve original list length/mapping, we return retrieval_records.
+    return retrieval_records
