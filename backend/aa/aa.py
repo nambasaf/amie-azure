@@ -173,10 +173,12 @@ INSTRUCTIONS FOR FINAL REPORT:
 5. The Novelty Verdict MUST be one of:
    - NOVEL
    - NOT NOVEL
-   - INCONCLUSIVE
 6. Do NOT use hedging language ("may", "appears", "potentially") in the verdict line.
-7. After the verdict line, include a short **Rationale** (2–4 sentences) that
-   justifies the verdict using CSS/EWSS comparisons.
+7. You are NOT allowed to output "INCONCLUSIVE" under any circumstances.
+8. After the verdict line, include a short **Rationale** (2–4 sentences) that:
+    - References the highest EWSS score
+    - Explains why it does or does not meet the threshold
+    - Clearly justifies the decision
 
 DATA TO DISPLAY:\n\n{frt_md}
 """
