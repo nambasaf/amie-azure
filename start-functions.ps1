@@ -3,20 +3,22 @@
 
 Write-Host "Starting Azure Functions..." -ForegroundColor Green
 
+$venvActivate = "$PSScriptRoot\.venv\Scripts\Activate.ps1"
+
 # Start Ingestion Function
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd backend/ingestion-agent; func start" -WindowStyle Normal
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "& '$venvActivate'; cd '$PSScriptRoot\backend\ingestion-agent'; func start" -WindowStyle Normal
 
 # Wait a bit
 Start-Sleep -Seconds 2
 
 # Start NAA Function on different port
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd backend/naa-amie-azure-clean; func start --port 7072" -WindowStyle Normal
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "& '$venvActivate'; cd '$PSScriptRoot\backend\naa-amie-azure-clean'; func start --port 7072" -WindowStyle Normal
 
 # Wait a bit
 Start-Sleep -Seconds 2
 
 # Start IDCA Function on different port
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd backend/idca_func; func start --port 7073" -WindowStyle Normal
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "& '$venvActivate'; cd '$PSScriptRoot\backend\idca_func'; func start --port 7073" -WindowStyle Normal
 
 Write-Host "All Functions starting in separate windows..." -ForegroundColor Yellow
 Write-Host "Ingestion: http://localhost:7071" -ForegroundColor Cyan

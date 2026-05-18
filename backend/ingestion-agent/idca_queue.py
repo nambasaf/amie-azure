@@ -3,7 +3,6 @@ import os
 import sys
 import pathlib
 
-import httpx
 import azure.functions as func
 from function_app import app
 
@@ -33,6 +32,8 @@ def idca_queue_worker(msg: func.QueueMessage):
     if key:
         url = f"{url}?code={key}"
     try:
+        import httpx
+
         # Increased timeout to 10 minutes to allow IDCA's LLM run to finish without retrying
         r = httpx.post(url, timeout=600.0)
         r.raise_for_status()

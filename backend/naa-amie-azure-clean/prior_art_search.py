@@ -3,6 +3,7 @@ import urllib.parse
 import time
 import logging
 import asyncio
+import os
 from typing import List
 from math import ceil
 
@@ -10,6 +11,7 @@ EMAIL = "nambasaf@oregonstate.edu"
 MAX_PER_PAGE = 200
 MAX_RETRIES = 5
 TIMEOUT = 20
+OPENALEX_SEMANTIC_MAX_LEN = 10_000
 
 # Semantic Scholar rate limiting (1 request per second)
 _semantic_scholar_last_request = 0.0
@@ -97,15 +99,93 @@ def sanitize_for_openalex(query: str) -> str:
 OPENALEX_SEARCH_MAX_LEN = 400
 
 
+def semantic_query_from_ucs(query: str) -> str:
+    """
+    Convert a UCS-style boolean string into a semantic-search-friendly query.
+
+    OpenAlex semantic search works better with natural keyword bags than with
+    long AND/OR-heavy boolean syntax. We therefore strip boolean operators and
+    punctuation while keeping the conceptual terms from the UCS.
+    """
+    semantic_query = sanitize_for_openalex(query)
+    if len(semantic_query) > OPENALEX_SEMANTIC_MAX_LEN:
+        semantic_query = semantic_query[:OPENALEX_SEMANTIC_MAX_LEN].rsplit(" ", 1)[0]
+    return semantic_query
+
+
+async def search_openalex_semantic(query: str, limit: int = 50):
+    """
+    Semantic OpenAlex search using /find/works.
+
+    Requires OPENALEX_API_KEY. Falls back to keyword search when absent.
+    """
+    api_key = os.getenv("OPENALEX_API_KEY")
+    if not api_key:
+        logging.info("OpenAlex semantic search skipped: OPENALEX_API_KEY not set.")
+        return []
+
+    semantic_query = semantic_query_from_ucs(query)
+    if not semantic_query:
+        return []
+
+    count = min(max(limit, 1), 100)
+    encoded_query = urllib.parse.quote_plus(semantic_query)
+    encoded_filter = urllib.parse.quote_plus("has_abstract:true")
+    url = (
+        "https://api.openalex.org/find/works"
+        f"?query={encoded_query}"
+        f"&count={count}"
+        f"&filter={encoded_filter}"
+        f"&api_key={urllib.parse.quote_plus(api_key)}"
+    )
+
+    results = []
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        logging.info(f"OpenAlex Semantic Request URL: {url[:200]}...")
+        data = await fetch_page(client, url)
+        if not data:
+            logging.warning("OpenAlex semantic search failed; falling back to keyword search.")
+            return []
+
+        candidates = data.get("results") or data.get("data") or []
+        for item in candidates:
+            work = item.get("work", item)
+            if not isinstance(work, dict):
+                continue
+
+            abs_text = reconstruct_abstract(work.get("abstract_inverted_index"))
+            results.append(
+                {
+                    "id": work.get("id"),
+                    "doi": work.get("doi"),
+                    "title": work.get("display_name"),
+                    "year": work.get("publication_year"),
+                    "abstract": abs_text[:500],
+                    "url": work.get("id"),
+                    "source": "OpenAlex",
+                    "retrieved_by": ["structured_search", "openalex_semantic"],
+                    "semantic_score": item.get("score"),
+                }
+            )
+            if len(results) >= limit:
+                break
+
+    return results
+
+
 async def search_openalex(query: str, limit: int = 50):
     """
-    Async search for OpenAlex with sanitization fallback.
+    Async search for OpenAlex.
 
     Strategy:
-    1. Try original query first
-    2. If query fails (500 error or parser failure), sanitize and retry once
-    3. If sanitized query fails, return empty list
+    1. Try semantic search first when OPENALEX_API_KEY is configured
+    2. Fallback to keyword/boolean search with sanitization
     """
+    semantic_results = await search_openalex_semantic(query, limit=limit)
+    if semantic_results:
+        logging.info(f"OpenAlex semantic search returned {len(semantic_results)} results.")
+        return semantic_results
+
     # OpenAlex search param max 400 chars
     search_query = (
         query[:OPENALEX_SEARCH_MAX_LEN]
@@ -192,6 +272,7 @@ async def search_openalex(query: str, limit: int = 50):
                         "abstract": abs_text[:500],
                         "url": w["id"],
                         "source": "OpenAlex",
+                        "retrieved_by": ["structured_search"],
                     }
                 )
                 if len(results) >= limit:
@@ -418,6 +499,7 @@ async def search_patentsview(query: str, limit: int = 50):
                         "abstract": abstract[:500],
                         "url": google_url,
                         "source": "PatentsView",
+                        "retrieved_by": ["structured_search"],
                         "metadata": {
                             "inventors": inventors,
                             "patent_date": date,
@@ -637,6 +719,7 @@ async def search_semantic_scholar(query: str, limit: int = 50):
                     "abstract": abstract[:500] if abstract else "",
                     "url": url,
                     "source": "SemanticScholar",
+                    "retrieved_by": ["structured_search"],
                 }
             )
 

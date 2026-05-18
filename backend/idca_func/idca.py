@@ -17,7 +17,8 @@ from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
 from azure.data.tables import TableServiceClient
 from azure.ai.agents.models import MessageRole
-from PyPDF2 import PdfReader
+from azure.core.credentials import AzureKeyCredential
+from azure.ai.documentintelligence import DocumentIntelligenceClient
 import tempfile
 import httpx
 
@@ -167,22 +168,16 @@ def get_manuscript_text(request_id: str) -> str:
     blob = container.get_blob_client(filename)
     pdf_bytes = blob.download_blob().readall()
 
-    # Write to temporary file for parsing
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(pdf_bytes)
-        tmp_path = tmp.name
-
-    # Extract text
-    reader = PdfReader(tmp_path)
-    extracted = []
-    for page in reader.pages:
-        extracted.append(page.extract_text() or "")  # avoid None
-
-    text = "\n".join(extracted).strip()
-
-    if not text or len(text) < 100:
-        print(" PyPDF2 returned very little text — this PDF may be scanned.")
-        print("-> If so, we will need to switch to pdfminer or OCR.")
+    # Use Azure Document Intelligence for text extraction
+    endpoint = os.getenv("DOC_INTELLIGENCE_ENDPOINT")
+    key = os.getenv("DOC_INTELLIGENCE_KEY")
+    if not endpoint or not key:
+        raise ValueError("Missing Document Intelligence credentials")
+        
+    client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+    poller = client.begin_analyze_document("prebuilt-layout", body=pdf_bytes)
+    result = poller.result()
+    text = result.content or ""
 
     return text
 

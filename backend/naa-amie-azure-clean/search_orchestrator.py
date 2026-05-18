@@ -4,7 +4,7 @@ from typing import List, Tuple
 from prior_art_search import search_openalex
 
 
-async def search_all_sources(query: str) -> List[dict]:
+async def search_all_sources(query: str, openalex_query: str | None = None) -> List[dict]:
     """
     Fan-out query to all search engines.
 
@@ -17,6 +17,9 @@ async def search_all_sources(query: str) -> List[dict]:
     paper vs patent separation (user requirement).
     """
     logging.info(f"Searching all sources for: {query[:50]}...")
+    openalex_input = (openalex_query or query).strip()
+    if openalex_input != query:
+        logging.info(f"Using OpenAlex semantic query from SS Synopsis: {openalex_input[:120]}...")
 
     # Import search functions
     from prior_art_search import search_patentsview
@@ -24,7 +27,7 @@ async def search_all_sources(query: str) -> List[dict]:
 
     # Dispatch to all engines in parallel
     tasks = [
-        search_openalex(query),
+        search_openalex(openalex_input),
         search_patentsview(query),
         search_semantic_scholar(query),
     ]
@@ -85,7 +88,13 @@ def split_ucs(ucs: str) -> List[str]:
     return blocks
 
 
+<<<<<<< Updated upstream
 async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List[dict]]:
+=======
+async def progressive_search(
+    ucs: str, target_total: int = 250, openalex_query: str | None = None
+) -> Tuple[str, List[dict]]:
+>>>>>>> Stashed changes
     """
     Orchestrates the Progressive Search algorithm across ALL engines.
 
@@ -105,7 +114,7 @@ async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List
 
     # 1. Full Query (ALWAYS TEST FIRST)
     print(f"[FULL QUERY TEST] {ucs[:100]}...")
-    results = await search_all_sources(ucs)
+    results = await search_all_sources(ucs, openalex_query=openalex_query)
 
     for r in results:
         if r["url"] not in seen_ids:
@@ -142,7 +151,7 @@ async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List
         print(f"\n  [Attempt {i + 1}] Removing block {i + 1}: '{blocks[i][:50]}...'")
         print(f"  Testing: {query[:100]}...")
 
-        new_results = await search_all_sources(query)
+        new_results = await search_all_sources(query, openalex_query=openalex_query)
 
         added_count = 0
         for r in new_results:

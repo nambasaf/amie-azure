@@ -28,6 +28,16 @@ function safeJson(str, fallback = null) {
   }
 }
 
+function formatFoundBy(ref) {
+  const retrievedBy = Array.isArray(ref?.retrieved_by) ? ref.retrieved_by : [];
+  const hasDeep = retrievedBy.includes('deep_research');
+  const hasStructured = retrievedBy.includes('structured_search');
+  if (hasDeep && hasStructured) return 'Both';
+  if (hasDeep) return 'Deep Research';
+  if (hasStructured) return 'Structured Search';
+  return null;
+}
+
 function AssessmentResult({ fullResult, filename }) {
   const parsed = useMemo(() => {
     if (!fullResult) return null;
@@ -67,23 +77,47 @@ function AssessmentResult({ fullResult, filename }) {
     const orange = [255, 111, 0];
     const dark = [32, 32, 32];
 
+    const ensurePageSpace = (requiredHeight = lineH) => {
+      if (y > pageH - 25 - requiredHeight) {
+        doc.addPage();
+        y = margin;
+        doc.setDrawColor(...orange);
+        doc.setLineWidth(0.5);
+        doc.line(margin, y - 4, pageW - margin, y - 4);
+        y += 6;
+      }
+    };
+
     const addText = (text, opts = {}) => {
       const { font = 'helvetica', size = 10, bold = false } = opts;
       doc.setFont(font, bold ? 'bold' : 'normal');
       doc.setFontSize(size);
       const lines = doc.splitTextToSize(String(text), pageW - 2 * margin);
       lines.forEach((line) => {
-        if (y > pageH - 25) {
-          doc.addPage();
-          y = margin;
-          doc.setDrawColor(...orange);
-          doc.setLineWidth(0.5);
-          doc.line(margin, y - 4, pageW - margin, y - 4);
-          y += 6;
-        }
+        ensurePageSpace();
         doc.text(line, margin, y);
         y += lineH;
       });
+    };
+
+    const addReferenceLink = (url) => {
+      ensurePageSpace();
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(...orange);
+      doc.textWithLink('Open link', margin + 6, y, { url });
+      y += lineH;
+
+      doc.setFontSize(8);
+      doc.setTextColor(90, 90, 90);
+      const urlLines = doc.splitTextToSize(String(url), pageW - 2 * margin - 6);
+      urlLines.forEach((line) => {
+        ensurePageSpace();
+        doc.text(line, margin + 6, y);
+        y += lineH - 1;
+      });
+
+      doc.setTextColor(0, 0, 0);
     };
 
     // Header bar (AMIE branding)
@@ -154,6 +188,13 @@ function AssessmentResult({ fullResult, filename }) {
         const title = ref.title || ref.reference_citation || '—';
         const source = ref.source || '—';
         addText(`  ${i + 1}. [${source}] ${title}`, { size: 9 });
+        const foundBy = formatFoundBy(ref);
+        if (foundBy) {
+          addText(`     Found by: ${foundBy}`, { size: 8 });
+        }
+        if (ref.url) {
+          addReferenceLink(ref.url);
+        }
       });
     }
     y += sectionGap;
@@ -253,10 +294,17 @@ function AssessmentResult({ fullResult, filename }) {
                   <ListItem key={i} disablePadding sx={{ py: 0.5 }}>
                     <ListItemText
                       primary={
-                        <Typography variant="body2" sx={{ color: '#ddd' }}>
-                          [{ref.source || '—'}] {ref.title || ref.reference_citation || '—'}
-                          {ref.year != null && ` (${ref.year})`}
-                        </Typography>
+                        <Box>
+                          <Typography variant="body2" sx={{ color: '#ddd' }}>
+                            [{ref.source || '—'}] {ref.title || ref.reference_citation || '—'}
+                            {ref.year != null && ` (${ref.year})`}
+                          </Typography>
+                          {formatFoundBy(ref) && (
+                            <Typography variant="caption" sx={{ color: '#aaa' }}>
+                              Found by: {formatFoundBy(ref)}
+                            </Typography>
+                          )}
+                        </Box>
                       }
                       secondary={
                         ref.url ? (

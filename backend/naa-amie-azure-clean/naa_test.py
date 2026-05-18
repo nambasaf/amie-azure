@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import asyncio
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
 
@@ -13,6 +14,10 @@ from azure.identity import DefaultAzureCredential
 # LAZY AZURE CLIENT & ENV VALIDATION
 # ---------------------------------------------------------------------
 _agents_client = None
+EXPERT_ROLE_PROMPT = (
+    "Act as a senior patent analyst with specific expertise across all of the "
+    "science and engineering fields listed in the Fields Map."
+)
 
 def get_agents_client():
     global _agents_client
@@ -41,6 +46,10 @@ def get_agent_id(var_name: str) -> str:
     if not agent_id:
         raise ValueError(f"Environment variable '{var_name}' is missing. Please set it in Azure App Settings or .env")
     return agent_id
+
+
+def with_expert_role(prompt: str) -> str:
+    return f"{EXPERT_ROLE_PROMPT}\n\n{prompt.strip()}"
 
 # Backward compatibility for modules that import these at top-level
 SS_AGENT_ID = os.getenv("SS_Agent_ID")
@@ -153,7 +162,7 @@ class NAAOutputs:
 # STEP 8 — SOURCE STRUCTURE (SS)
 # ---------------------------------------------------------------------
 def build_source_structure(manuscript_text: str, idca_output: str, agent_id: str) -> SourceStructure:
-    prompt = f"""
+    prompt = with_expert_role(f"""
 Decompose the Source Technology into elemental structural blocks.
 
 Each block MUST include:
@@ -182,7 +191,7 @@ Source Manuscript:
 
 IDCA Output:
 {idca_output}
-"""
+""")
 
     raw = _chat(agent_id, prompt)
 
@@ -219,7 +228,7 @@ IDCA Output:
 def build_ssr(ss: SourceStructure, agent_id: str) -> StructuralScoringRubric:
     summary = "\n".join(f"- {b.block_name}: {b.function}" for b in ss.blocks)
 
-    prompt = f"""
+    prompt = with_expert_role(f"""
 You are constructing a Structural Scoring Rubric (SSR) for the Source Structure (SS).
 
 The purpose of the SSR is to evaluate whether a Reference Manuscript discloses
@@ -254,7 +263,7 @@ Return ONLY this JSON:
 
 Source Structure:
 {summary}
-"""
+""")
 
     raw = _chat(agent_id, prompt)
 
@@ -306,7 +315,7 @@ def render_ssr_table(ssr: StructuralScoringRubric) -> str:
 def ss_synopsis(ss: SourceStructure, agent_id: str) -> str:
     summary = "\n".join(f"- {b.block_name}: {b.function}" for b in ss.blocks)
 
-    prompt = f"""
+    prompt = with_expert_role(f"""
 Write a ONE-SENTENCE structural synopsis of the SS.
 
 Rules:
@@ -319,7 +328,7 @@ SS Blocks:
 {summary}
 
 Return ONLY the sentence.
-"""
+""")
 
     out = _chat(agent_id, prompt)
     return out.strip()
@@ -331,7 +340,7 @@ Return ONLY the sentence.
 def build_ucs(ss: SourceStructure, agent_id: str) -> str:
     summary = "\n".join(f"- {b.block_name}: {b.function}" for b in ss.blocks)
 
-    prompt = f"""
+    prompt = with_expert_role(f"""
 Convert the SS into a Unified Composite Search string (UCS).
 
 STRICT REQUIREMENTS (must be followed exactly):
@@ -355,7 +364,7 @@ SS Blocks:
 {summary}
 
 Return ONLY the UCS string.
-"""
+""")
 
     ucs = _chat(agent_id, prompt)
     # normalize whitespace
@@ -370,6 +379,9 @@ Return ONLY the UCS string.
 # ---------------------------------------------------------------------
 async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutputs:
     logging.info("Starting NAA workflow...\n")
+
+    logging.info("\n===== EXPERT ROLE =====")
+    logging.info(f" {EXPERT_ROLE_PROMPT}")
 
     # -------------------- STEP 8 --------------------
     logging.info("\n===== SOURCE STRUCTURE (SS) =====")
@@ -426,17 +438,92 @@ async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutput
             search_query = "prior art"  # last resort
             logging.warning("UCS and fallback empty — using minimal query 'prior art'")
 
-    from search_orchestrator import (
-        progressive_search as parallel_progressive_search,
-    )
+    from search_orchestrator import progressive_search as parallel_progressive_search
 
     try:
+<<<<<<< Updated upstream
         # Run async search directly
         final_query, LoR = await parallel_progressive_search(search_query, target_total=5)
+=======
+        use_deep_research = os.getenv("USE_DEEP_RESEARCH", "true").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        final_query = search_query
+        search_target = int(os.getenv("SEARCH_TARGET", 250))
+        deep_research_results = []
+        database_results = []
+
+        async def run_database_search():
+            logging.info("[STEP 12] Starting structured source search (OpenAlex + PatentsView + Semantic Scholar)...")
+            return await parallel_progressive_search(
+                search_query,
+                target_total=search_target,
+                openalex_query=synopsis,
+            )
+
+        tasks = [asyncio.create_task(run_database_search(), name="structured_search")]
+
+        if use_deep_research:
+            from deep_research import deep_research_lor
+
+            logging.info("[STEP 12] Starting Azure Deep Research in parallel...")
+            tasks.append(
+                asyncio.create_task(
+                    deep_research_lor(
+                        ucs=search_query,
+                        synopsis=synopsis,
+                        source_structure=ss,
+                    ),
+                    name="deep_research",
+                )
+            )
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for task, result in zip(tasks, results):
+            if isinstance(result, Exception):
+                logging.error(f"[STEP 12] {task.get_name()} failed: {result}")
+                continue
+
+            if task.get_name() == "structured_search":
+                final_query, database_results = result
+                logging.info(f"[STEP 12] Structured source search returned {len(database_results)} references")
+            elif task.get_name() == "deep_research":
+                deep_research_results = result
+                logging.info(f"[STEP 12] Deep Research returned {len(deep_research_results)} references")
+
+        def reference_key(ref: Dict[str, Any]) -> str:
+            for field_name in ("url", "doi", "patent_id", "id", "title"):
+                value = ref.get(field_name)
+                if value:
+                    return str(value).strip().lower()
+            return json.dumps(ref, sort_keys=True).lower()
+
+        merged = []
+        seen_index = {}
+        for ref in deep_research_results + database_results:
+            key = reference_key(ref)
+            if key in seen_index:
+                existing = merged[seen_index[key]]
+                existing_by = set(existing.get("retrieved_by", []))
+                incoming_by = set(ref.get("retrieved_by", []))
+                existing["retrieved_by"] = sorted(existing_by | incoming_by)
+                continue
+            ref["retrieved_by"] = sorted(set(ref.get("retrieved_by", [])))
+            seen_index[key] = len(merged)
+            merged.append(ref)
+
+        LoR = merged[:search_target] if len(merged) > search_target else merged
+>>>>>>> Stashed changes
 
         logging.info("\n[STEP 12 OUTPUT]")
         logging.info(f" PRIOR ART QUERY: {final_query if final_query else '(none)'}")
         logging.info(f" REFERENCES FOUND: {len(LoR)}")
+        logging.info(f" DEEP RESEARCH REFERENCES: {len(deep_research_results)}")
+        logging.info(f" STRUCTURED SEARCH REFERENCES: {len(database_results)}")
 
         if not LoR:
             logging.info(" No Reference Manuscripts found — UCS may be too strict.")

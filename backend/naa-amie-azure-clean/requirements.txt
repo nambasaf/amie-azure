@@ -1,11 +1,13 @@
 azure-functions
 azure-storage-blob
 azure-data-tables
+python-dotenv
+azure-ai-documentintelligence
+azure-ai-agents
+azure-identity
+azure-core
 pypdf
 requests
 httpx
 tqdm
-python-dotenv
-azure-ai-agents
-azure-identity
-azure-core
+openai

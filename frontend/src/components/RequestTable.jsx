@@ -5,6 +5,14 @@ import {
   TableHead, TableRow, Paper, Chip, Typography, CircularProgress, Button, Box
 } from '@mui/material';
 
+function buildApiUrl(baseUrl, path, code) {
+  const url = new URL(path, `${baseUrl}/`);
+  if (code) {
+    url.searchParams.set('code', code);
+  }
+  return url.toString();
+}
+
 function statusColor(status) {
   switch (status?.toLowerCase()) {
     case 'assessed':
@@ -34,7 +42,7 @@ export default function RequestTable() {
       const baseUrl = import.meta.env.VITE_API_BASE; // use ingestion host
       const authCode = import.meta.env.VITE_INGESTION_AGENT_FUNCTION_KEY;
 
-      const url = `${baseUrl}/api/requests?code=${authCode}`;
+      const url = buildApiUrl(baseUrl, 'api/requests', authCode);
       const { data } = await axios.get(url);
 
       const sorted = Array.isArray(data)

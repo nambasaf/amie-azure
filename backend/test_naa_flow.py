@@ -14,12 +14,13 @@ if str(REPO_ROOT) not in sys.path:
 
 # Import checks
 try:
-    from backend.naa_brain_MVP.naa_test import run_steps_8_to_12
-    from backend.naa_brain_MVP.rm_retrieval import download_and_store_rms
-    from backend.naa_brain_MVP.rm_assessment import assess_all_rms
+    from backend.naa_test import run_steps_8_to_12
+    from backend.rm_retrieval import download_and_store_rms
+    from backend.rm_assessment import assess_all_rms
     from azure.data.tables import TableServiceClient
     from azure.storage.blob import BlobServiceClient
-    from pypdf import PdfReader
+    from azure.core.credentials import AzureKeyCredential
+    from azure.ai.documentintelligence import DocumentIntelligenceClient
 except ImportError as e:
     print(f"Import Error: {e}")
     sys.exit(1)
@@ -57,12 +58,15 @@ def extract_text(blob_service, blob_name):
     if not blob_name.lower().endswith(".pdf"):
         return ""
         
-    reader = PdfReader(io.BytesIO(data))
-    text = ""
-    for page in reader.pages:
-        t = page.extract_text()
-        if t: text += t + " "
-    return text.strip()
+    endpoint = os.getenv("DOC_INTELLIGENCE_ENDPOINT")
+    key = os.getenv("DOC_INTELLIGENCE_KEY")
+    if not endpoint or not key:
+        raise ValueError("Missing Document Intelligence credentials")
+        
+    client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+    poller = client.begin_analyze_document("prebuilt-layout", body=data)
+    result = poller.result()
+    return result.content or ""
 
 async def run_naa_test(request_id):
     print(f"--- Starting Manual NAA Test for Request ID: {request_id} ---")

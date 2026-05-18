@@ -1,18 +1,9 @@
 import azure.functions as func
-from azure.storage.blob import BlobServiceClient
-from azure.data.tables import TableServiceClient, TableEntity
 import logging
 import os
 import uuid
 import datetime
 import json
-
-import tempfile
-from PyPDF2 import PdfReader
-from azure.storage.queue import QueueClient, TextBase64EncodePolicy
-from azure.identity import DefaultAzureCredential
-from azure.core.exceptions import ResourceExistsError
-
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -24,6 +15,9 @@ TABLE_NAME = "IngestionRequests"
 STORAGE_ACCOUNT_NAME = os.getenv("STORAGE_ACCOUNT_NAME")
 
 def get_queue_client():
+    from azure.core.exceptions import ResourceExistsError
+    from azure.storage.queue import QueueClient, TextBase64EncodePolicy
+
     conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
     if not conn_str:
         raise RuntimeError("No storage connection string found")
@@ -44,6 +38,9 @@ def get_queue_client():
 
 
 def get_blob_service():
+    from azure.identity import DefaultAzureCredential
+    from azure.storage.blob import BlobServiceClient
+
     conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
     if conn_str:
         return BlobServiceClient.from_connection_string(conn_str)
@@ -57,6 +54,9 @@ def get_blob_service():
     )
 
 def get_table_service():
+    from azure.data.tables import TableServiceClient
+    from azure.identity import DefaultAzureCredential
+
     conn_str = os.getenv("TABLE_CONNECTION_STRING") or os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv("AzureWebJobsStorage")
     if conn_str:
         return TableServiceClient.from_connection_string(conn_str)
@@ -287,25 +287,24 @@ def get_status(req: func.HttpRequest) -> func.HttpResponse:
 
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
-    """Extracts plain text from PDF bytes using PyPDF2."""
+    """Extracts text from PDF bytes using Azure Document Intelligence."""
     try:
-        # write PDF bytes to temp file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(pdf_bytes)
-            tmp_path = tmp.name
+        from azure.ai.documentintelligence import DocumentIntelligenceClient
+        from azure.core.credentials import AzureKeyCredential
 
-        # extract text from PDF
-        reader = PdfReader(tmp_path)
-        extracted = []
+        endpoint = os.getenv("DOC_INTELLIGENCE_ENDPOINT")
+        key = os.getenv("DOC_INTELLIGENCE_KEY")
+        
+        if not endpoint or not key:
+            raise ValueError("Missing Document Intelligence credentials in environment variables.")
 
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                extracted.append(text)
-
-        final_text = "\n".join(extracted).strip()
-        return final_text
-
+        client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+        poller = client.begin_analyze_document("prebuilt-layout", body=pdf_bytes)
+        result = poller.result()
+        
+        # Depending on version "result.content" holds the concatenated structure of the document
+        return result.content or ""
+        
     except Exception as e:
         logging.error(f"PDF text extraction failed: {e}")
         raise
@@ -373,7 +372,6 @@ def get_text(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error(f"Failed to extract text: {e}")
         return func.HttpResponse(f"Error: {e}", status_code=500)
-
 
 # Import queue workers so Azure Functions registers them
 import idca_queue  # noqa: F401

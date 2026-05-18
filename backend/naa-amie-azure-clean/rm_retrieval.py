@@ -198,6 +198,17 @@ async def process_single_rm(rm: Dict[str, Any], container_client, api_key: str =
     title = rm.get("title", "untitled")
     source = rm.get("source", "Unknown")
     
+<<<<<<< Updated upstream
+=======
+    record = {
+        "rm_data": rm,
+        "blob_name": None,
+        "stored": False,
+        "error": None,
+        "content_mode": None,
+    }
+
+>>>>>>> Stashed changes
     if not url:
         return None
 
@@ -225,16 +236,49 @@ async def process_single_rm(rm: Dict[str, Any], container_client, api_key: str =
             blob_client = container_client.get_blob_client(blob_name)
             blob_client.upload_blob(content.encode('utf-8'), overwrite=True)
             logging.info(f"Stored patent: {blob_name} ({len(content)} chars)")
+            record["content_mode"] = "patent_text"
         
         else:
             # Default: Download PDF (for OpenAlex and other sources)
-            blob_name += ".pdf"
-            content = await download_pdf(url)
-            
-            # Upload PDF
-            blob_client = container_client.get_blob_client(blob_name)
-            blob_client.upload_blob(content, overwrite=True)
-            logging.info(f"Stored PDF: {blob_name} ({len(content)} bytes)")
+            try:
+                blob_name += ".pdf"
+                content = await download_pdf(url)
+
+                # Upload PDF
+                blob_client = container_client.get_blob_client(blob_name)
+                blob_client.upload_blob(content, overwrite=True)
+                logging.info(f"Stored PDF: {blob_name} ({len(content)} bytes)")
+                record["content_mode"] = "pdf"
+            except Exception as pdf_error:
+                abstract = (rm.get("abstract") or "").strip()
+                if not abstract:
+                    raise pdf_error
+
+                fallback_blob_name = f"{sanitize_name(title)}_{int(time.time())}.txt"
+                fallback_text = "\n".join(
+                    [
+                        f"Title: {title}",
+                        f"Source: {source}",
+                        f"Year: {rm.get('year', 'Unknown')}",
+                        f"URL: {url}",
+                        f"DOI: {rm.get('doi', '')}",
+                        "",
+                        "Abstract fallback used because the full manuscript could not be downloaded.",
+                        "",
+                        abstract,
+                    ]
+                ).strip()
+
+                blob_client = container_client.get_blob_client(fallback_blob_name)
+                blob_client.upload_blob(fallback_text.encode("utf-8"), overwrite=True)
+                logging.info(
+                    f"Stored abstract fallback: {fallback_blob_name} ({len(fallback_text)} chars)"
+                )
+                record["blob_name"] = fallback_blob_name
+                record["stored"] = True
+                record["content_mode"] = "abstract_fallback"
+                record["fallback_reason"] = str(pdf_error)
+                return record
         
         return blob_name
         

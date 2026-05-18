@@ -5,12 +5,14 @@ import logging
 import asyncio
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
-from pypdf import PdfReader
+from azure.core.credentials import AzureKeyCredential
+from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.storage.blob import BlobServiceClient
 from rm_retrieval import get_container_name
 from naa_test import (
     _chat,
     SSR_AGENT_ID,
+    EXPERT_ROLE_PROMPT,
     render_ssr_table,
     StructuralScoringRubric,
     SSRItem,
@@ -43,13 +45,15 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
             # Decode text file
             return file_bytes.decode("utf-8")
         else:
-            # Assume PDF
-            with io.BytesIO(file_bytes) as f:
-                reader = PdfReader(f)
-                text = []
-                for page in reader.pages:
-                    text.append(page.extract_text() or "")
-                return "\n".join(text)
+            endpoint = os.getenv("DOC_INTELLIGENCE_ENDPOINT")
+            key = os.getenv("DOC_INTELLIGENCE_KEY")
+            if not endpoint or not key:
+                raise ValueError("Missing Document Intelligence credentials")
+                
+            client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+            poller = client.begin_analyze_document("prebuilt-layout", body=file_bytes)
+            result = poller.result()
+            return result.content or ""
     except Exception as e:
         logging.error(f"Failed to extract text from {filename}: {e}")
         return ""
@@ -99,6 +103,8 @@ def generate_assessment_prompt(rm_text: str, ssr_json: str, ss_summary: str) -> 
     truncated_text = rm_text[:30000]
 
     return f"""
+{EXPERT_ROLE_PROMPT}
+
 You are the Novelty Assessment Agent. Your task is to Assess a Reference Manuscript (RM) against a Source Structure (SS) using a Structural Scoring Rubric (SSR).
 
 SOURCE STRUCTURE SUMMARY:
@@ -163,8 +169,102 @@ Note:
 """
 
 
+<<<<<<< Updated upstream
 # Cap RM assessments to stay within function timeout (~10 min with sequential LLM runs)
 MAX_RMS_TO_ASSESS = 5
+=======
+import time
+import random
+
+# ---------------------------------------------------------------------
+# ASYNC RETRY HELPER
+# ---------------------------------------------------------------------
+async def async_retry_agent(coro_fn, agent_name: str, max_attempts: int = 3):
+    """
+    Async retry wrapper with exponential backoff and jitter.
+    """
+    last_exception = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Check if coro_fn is a coroutine object or a function that returns one
+            if asyncio.iscoroutine(coro_fn):
+                return await coro_fn
+            else:
+                return await coro_fn()
+        except Exception as e:
+            last_exception = e
+            logging.warning(f"[RETRY] {agent_name} failed (Attempt {attempt}/{max_attempts}): {e}")
+            if attempt < max_attempts:
+                sleep_time = (2 ** attempt) + (random.uniform(0, 1))
+                await asyncio.sleep(sleep_time)
+            else:
+                logging.error(f"[RETRY] {agent_name} exhausted all {max_attempts} attempts.")
+    raise last_exception
+
+# ---------------------------------------------------------------------
+# SINGLE RM ASSESSMENT (SAFE WRAPPER)
+# ---------------------------------------------------------------------
+async def assess_single_rm(
+    sem: asyncio.Semaphore,
+    record: Dict[str, Any],
+    container_client,
+    ssr_json: str,
+    ss_summary: str
+) -> Dict[str, Any]:
+    """
+    Wraps the assessment logic for a single RM with concurrency control and retries.
+    Updates the record in-place.
+    """
+    blob_name = record.get("blob_name")
+    if not record.get("stored") or not blob_name:
+        # Skip records that weren't stored
+        return record
+
+    async with sem:
+        logging.info(f"[RM-ASSESSMENT] Starting: {blob_name}")
+        try:
+            # 1. Download
+            blob_client = container_client.get_blob_client(blob_name)
+            content = blob_client.download_blob().readall()
+
+            # 2. Extract Text
+            text = extract_text_from_file(content, blob_name)
+            min_text_length = 200 if record.get("content_mode") == "abstract_fallback" else 500
+            if len(text) < min_text_length:
+                record["error"] = f"Text too short ({len(text)} chars). Skipping."
+                return record
+
+            # 3. Assess with Retries
+            prompt = generate_assessment_prompt(text, ssr_json=ssr_json, ss_summary=ss_summary)
+            
+            # Note: _chat is sync in naa_test.py. We need to run it in a thread if we want true async, 
+            # or wrap it if it's already async. In naa_test.py it looks sync.
+            # For now, let's wrap the sync _chat in to_thread.
+            
+            async def _do_chat():
+                return await asyncio.to_thread(_chat, SSR_AGENT_ID, prompt)
+
+            response_json_str = await async_retry_agent(_do_chat, f"SSR Agent ({blob_name})")
+            
+            # 4. Parse
+            data = json.loads(response_json_str)
+            
+            # Update record
+            record["assessed"] = True
+            record["assessment"] = data
+            record["status_determination"] = data.get("novelty_status", "Unknown")
+            record["ewss"] = data.get("ewss", 0.0)
+            
+            logging.info(f"  -> Analyzed {blob_name}. Status: {record['status_determination']} (EWSS: {record['ewss']})")
+
+        except Exception as e:
+            err_msg = f"Assessment failed for {blob_name}: {str(e)}"
+            logging.error(err_msg)
+            record["assessed"] = False
+            record["error"] = err_msg
+
+    return record
+>>>>>>> Stashed changes
 
 # ---------------------------------------------------------------------
 # MAIN ASSESSMENT FUNCTION

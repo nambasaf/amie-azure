@@ -1,7 +1,9 @@
+azure-core
+azure-ai-documentintelligence
+azure-ai-agents
 azure-functions
 azure-storage-blob
-azure-data-tables
 azure-storage-queue
-PyPDF2
-httpx
+azure-data-tables
 azure-identity
+httpx

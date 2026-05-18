@@ -50,20 +50,24 @@ def get_manuscript_text(blob_name: str) -> str:
         data = blob_client.download_blob().readall()
 
         if not blob_name.lower().endswith(".pdf"):
-            return ""
+            logging.warning(f"Unsupported file type: {blob_name}")
+            return ""   
 
-        from pypdf import PdfReader  # Lazy import
+        from azure.core.credentials import AzureKeyCredential
+        from azure.ai.documentintelligence import DocumentIntelligenceClient
 
-        reader = PdfReader(io.BytesIO(data))
-        text = ""
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + " "
-        return text.strip()
+        endpoint = os.getenv("DOC_INTELLIGENCE_ENDPOINT")
+        key = os.getenv("DOC_INTELLIGENCE_KEY")
+        if not endpoint or not key:
+            raise ValueError("Missing Document Intelligence credentials")
+            
+        client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+        poller = client.begin_analyze_document("prebuilt-layout", body=data)
+        result = poller.result()
+        return result.content or ""
     except Exception as e:
         logging.error(f"Text extraction failed: {e}")
-        return ""
+        raise
 
 
 # === POST /assess — START NAA ===
@@ -222,7 +226,12 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # 1. Run full NAA pipeline (Steps 8-12)
         # ------------------------------------------------------------------
         manuscript_text = get_manuscript_text(filename)
+<<<<<<< Updated upstream
         # Fix: Await the async pipeline
+=======
+        if not manuscript_text:
+            raise ValueError(f"No text extracted for request {request_id}") 
+>>>>>>> Stashed changes
         naa_outputs = await run_steps_8_to_12(manuscript_text, idca_output)
 
         # ------------------------------------------------------------------
