@@ -440,6 +440,26 @@ The exact settings differ a little by Function App, but the main services you ne
 
 The frontend expects the API base / function keys to be configured through Vite environment variables.
 
+For the hosted Vercel frontend, set:
+
+- `VITE_API_BASE`
+- `VITE_API_CODE`
+- `VITE_INGESTION_AGENT_FUNCTION_KEY`
+
+Production example:
+
+```env
+VITE_API_BASE=https://amie-ingestion-fn-hyd0hkd0hzfmawep.westus2-01.azurewebsites.net
+VITE_API_CODE=...
+VITE_INGESTION_AGENT_FUNCTION_KEY=...
+```
+
+The Azure ingestion Function App must allow the deployed Vercel origin in CORS:
+
+- `https://amie-azure-gtm4.vercel.app`
+
+Only the ingestion Function App is called directly by the browser. IDCA, NAA, and AA are triggered server-to-server from Azure Functions and do not need browser CORS for normal operation.
+
 ## What To Tell Reviewers
 
 If you need to explain the system quickly:
