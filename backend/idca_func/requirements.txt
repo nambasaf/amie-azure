@@ -5,3 +5,5 @@ azure-storage-blob
 azure-ai-agents
 azure-identity
 python-dotenv
+httpx
+azure-functions
