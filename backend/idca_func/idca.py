@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+import logging
 
 # Force stdout to be UTF-8 to prevent crashes on Windows consoles
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -37,22 +38,11 @@ AZURE_STORAGE_CONNECTION_STRING = os.getenv(
     "AZURE_STORAGE_CONNECTION_STRING"
 ) or os.getenv("AzureWebJobsStorage")
 
-if not PROJECT_ENDPOINT:
-    raise ValueError(" PROJECT_ENDPOINT missing in .env")
-
-if not MODEL_DEPLOYMENT:
-    raise ValueError(" MODEL_DEPLOYMENT missing in .env")
-
 CONTAINER_NAME = "manuscript-uploads"
 TABLE_NAME = "IngestionRequests"
 
-# ------------------- Azure Clients -------------------
-agents_client = AgentsClient(
-    endpoint=PROJECT_ENDPOINT,
-    credential=DefaultAzureCredential(),
-)
-
 # Storage clients - will be initialized with connection string (from env or CLI)
+agents_client = None
 blob_service = None
 table_service = None
 container = None
@@ -73,6 +63,50 @@ def init_storage_clients(connection_string: str):
 # Initialize with env var if available (for direct imports)
 if AZURE_STORAGE_CONNECTION_STRING:
     init_storage_clients(AZURE_STORAGE_CONNECTION_STRING)
+
+
+def get_idca_runtime():
+    """Resolve runtime config lazily so bad Azure settings produce useful errors."""
+    global agents_client
+
+    project_endpoint = os.getenv("PROJECT_ENDPOINT")
+    model_deployment = os.getenv("MODEL_DEPLOYMENT")
+    idca_agent_id = os.getenv("IDCA_AGENT_ID")
+    storage_conn = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or os.getenv(
+        "AzureWebJobsStorage"
+    )
+
+    missing = []
+    if not project_endpoint:
+        missing.append("PROJECT_ENDPOINT")
+    if not model_deployment:
+        missing.append("MODEL_DEPLOYMENT")
+    if not idca_agent_id:
+        missing.append("IDCA_AGENT_ID")
+    if not storage_conn:
+        missing.append("AZURE_STORAGE_CONNECTION_STRING/AzureWebJobsStorage")
+
+    if missing:
+        raise ValueError(f"Missing required IDCA environment variable(s): {', '.join(missing)}")
+
+    if agents_client is None:
+        logging.info("[IDCA] Creating AgentsClient")
+        agents_client = AgentsClient(
+            endpoint=project_endpoint,
+            credential=DefaultAzureCredential(),
+        )
+
+    if table is None or container is None:
+        logging.info("[IDCA] Initializing storage clients")
+        init_storage_clients(storage_conn)
+
+    return {
+        "project_endpoint": project_endpoint,
+        "model_deployment": model_deployment,
+        "idca_agent_id": idca_agent_id,
+        "storage_conn": storage_conn,
+        "agents_client": agents_client,
+    }
 
 # ------------------- IDCA Behavior Prompt -------------------
 IDCA_PROMPT = """
@@ -146,12 +180,6 @@ Do NOT include any other text.
 """
 
 # connect to our IDCA agent on Azure AI Foundry
-IDCA_AGENT_ID = os.getenv("IDCA_AGENT_ID")
-
-if not IDCA_AGENT_ID:
-    raise ValueError("Missing IDCA_AGENT_ID in .env")
-
-
 # ------------------- Helpers -------------------
 def get_manuscript_text(request_id: str) -> str:
     try:
@@ -183,7 +211,7 @@ def get_manuscript_text(request_id: str) -> str:
 
 
 # some are too large
-def send_in_chunks(thread_id, text, chunk_size=5000):
+def send_in_chunks(agents_client, thread_id, text, chunk_size=5000):
     for i in range(0, len(text), chunk_size):
         agents_client.messages.create(
             thread_id=thread_id, role=MessageRole.USER, content=text[i : i + chunk_size]
@@ -191,14 +219,22 @@ def send_in_chunks(thread_id, text, chunk_size=5000):
 
 
 # ------------------- Run IDCA -------------------
-def run_idca(request_id: str):
+def run_idca(request_id: str, preclaimed: bool = False):
+    logging.info(f"[IDCA] run_idca invoked for {request_id} (preclaimed={preclaimed})")
+    runtime = get_idca_runtime()
+    agents_client = runtime["agents_client"]
+    idca_agent_id = runtime["idca_agent_id"]
+
     # ------------------- IDEMPOTENCY GUARD -------------------
     try:
         entity = table.get_entity("AMIE", request_id)
         current_status = entity.get("status")
 
         # If IDCA is already running or already finished, do NOT restart
-        if current_status in ("classifying", "classified", "naa_running", "completed"):
+        guarded_statuses = {"classified", "naa_running", "completed"}
+        if not preclaimed:
+            guarded_statuses.add("classifying")
+        if current_status in guarded_statuses:
             print(f"[GUARD] IDCA already {current_status} for {request_id}. Exiting.")
             return
     except Exception as e:
@@ -222,7 +258,7 @@ def run_idca(request_id: str):
             thread_id=thread.id, role=MessageRole.USER, content=IDCA_PROMPT
         )
 
-        send_in_chunks(thread.id, manuscript)
+        send_in_chunks(agents_client, thread.id, manuscript)
         msgs = list(agents_client.messages.list(thread_id=thread.id))
         print(f"Messages stored in thread: {len(msgs)}")
         print(f"First chunk:\n{msgs[0].text_messages[0].text.value[:300]}")
@@ -231,7 +267,7 @@ def run_idca(request_id: str):
 
         # Start run
         run = agents_client.runs.create_and_process(
-            thread_id=thread.id, agent_id=IDCA_AGENT_ID
+            thread_id=thread.id, agent_id=idca_agent_id
         )
 
         # Retrieve messages after run completes
@@ -254,13 +290,14 @@ def run_idca(request_id: str):
         raise RuntimeError("No assistant response returned.")
 
     # Mark as classifying BEFORE running IDCA
-    try:
-        entity = table.get_entity("AMIE", request_id)
-        entity["status"] = "classifying"
-        table.update_entity(entity)
-        print(f"\n[STATUS] Set to 'classifying' for request {request_id}")
-    except Exception as e:
-        print(f"\n[WARNING] Failed to update status to 'classifying': {e}")
+    if not preclaimed:
+        try:
+            entity = table.get_entity("AMIE", request_id)
+            entity["status"] = "classifying"
+            table.update_entity(entity)
+            print(f"\n[STATUS] Set to 'classifying' for request {request_id}")
+        except Exception as e:
+            print(f"\n[WARNING] Failed to update status to 'classifying': {e}")
 
     # Execute IDCA agent with retry logic (bounded to 5 attempts)
     try:

@@ -45,6 +45,10 @@ function getAgentStatusWeight(status) {
   switch (status?.toLowerCase()) {
     case 'error':
     case 'failed':
+    case 'idca_trigger_failed':
+    case 'naa_trigger_failed':
+    case 'aa_trigger_failed':
+    case 'enqueue_failed':
       return 4; // Final failure state
     case 'done':
     case 'classified':
@@ -102,6 +106,8 @@ function mergeAgents(prevAgents, newStatus) {
     updateAgent(1, 'queued');
   } else if (s === 'classifying') {
     updateAgent(1, 'classifying');
+  } else if (s === 'idca_trigger_failed') {
+    updateAgent(1, 'failed');
   } else if (['classified', 'analyzing', 'assessed', 'completed'].includes(s)) {
     updateAgent(1, 'classified');
   } else if (['failed', 'error'].includes(s) && !nextAgents[1].status.match(/done|classified/)) {
@@ -112,6 +118,8 @@ function mergeAgents(prevAgents, newStatus) {
   // 3. NAA
   if (s === 'analyzing') {
     updateAgent(2, 'analyzing');
+  } else if (s === 'naa_trigger_failed') {
+    updateAgent(2, 'failed');
   } else if (['assessed', 'completed'].includes(s)) {
     updateAgent(2, 'assessed');
   } else if (s === 'failed') {
@@ -121,6 +129,8 @@ function mergeAgents(prevAgents, newStatus) {
   // 4. Aggregation Agent
   if (s === 'assessed') {
     updateAgent(3, 'in_progress'); // AA runs after assessment
+  } else if (s === 'aa_trigger_failed') {
+    updateAgent(3, 'failed');
   } else if (s === 'completed') {
     updateAgent(3, 'done');
   }
