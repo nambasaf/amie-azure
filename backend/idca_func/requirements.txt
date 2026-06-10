@@ -1,2 +1,7 @@
 azure-ai-documentintelligence==1.0.2
 azure-core
+azure-data-tables 
+azure-storage-blob
+azure-ai-agents
+azure-identity
+python-dotenv
