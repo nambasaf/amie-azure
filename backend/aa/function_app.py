@@ -65,15 +65,29 @@ def run_aa(req: func.HttpRequest) -> func.HttpResponse:
             entity = table_client.get_entity(partition_key="AMIE", row_key=request_id)
             status = entity.get("status", "").lower()
             
-            # If already processing or done, skip
-            if status != "assessed":
+            # Allow AA to run from:
+            # - assessed: normal post-NAA path
+            # - classified: no-invention path where IDCA skips NAA and calls AA directly
+            idca_output_str = entity.get("idca_output", "{}")
+            try:
+                idca_output_preview = json.loads(idca_output_str)
+            except Exception:
+                idca_output_preview = {}
+
+            idca_status = (idca_output_preview.get("status_determination") or "").strip().lower()
+            aa_allowed = status == "assessed" or (
+                status == "classified" and idca_status in {"absent", "implied"}
+            )
+
+            if not aa_allowed:
                 logging.info(
-                    f"AA cannot run from state '{status}'. Expected 'assessed'. Skipping."
+                    f"AA cannot run from state '{status}' with IDCA status '{idca_status}'. "
+                    "Expected 'assessed', or 'classified' for absent/implied inventions. Skipping."
                 )
                 return func.HttpResponse(
                     f"AA cannot run from state '{status}'.",
                     status_code=200,
-            )
+                )
 
             # Note: We don't have a specific "aggregating" status in the current UI, 
             # but we can claim it to prevent overlapping runs.

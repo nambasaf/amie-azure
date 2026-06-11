@@ -351,17 +351,11 @@ def run_idca(request_id: str, preclaimed: bool = False):
                 aa_url = f"{aa_url}?code={aa_key}"
             
             print(f"\n[TRIGGER] Calling AA at {aa_url}")
-            httpx.post(aa_url, timeout=120.0) # Increased to 2m for AA startup
-            
-            # Mark as completed for the UI
-            from datetime import datetime
-
-            entity = table.get_entity("AMIE", request_id)
-            entity["status"] = "completed"
-            entity["completed_at"] = datetime.utcnow().isoformat()
-            table.update_entity(entity)
+            aa_response = httpx.post(aa_url, timeout=120.0)  # Increased to 2m for AA startup
+            aa_response.raise_for_status()
             print(
-                f"[STATUS] Set to 'completed' for request {request_id} (No invention)"
+                f"[TRIGGER] AA responded for {request_id}: "
+                f"{aa_response.status_code} {aa_response.text[:200]}"
             )
         except Exception as e:
             print("\n Aggregation Agent failed:", str(e))
