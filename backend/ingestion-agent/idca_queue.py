@@ -72,7 +72,7 @@ def idca_queue_worker(msg: func.QueueMessage):
             _update_ingestion_status(
                 request_id,
                 "idca_trigger_failed",
-                idca_error=f"HTTP {r.status_code}",
+                idca_error=f"HTTP {r.status_code}: {body}" if body else f"HTTP {r.status_code}",
                 idca_trigger_url=url,
             )
             if r.status_code in {401, 403, 404}:

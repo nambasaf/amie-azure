@@ -55,11 +55,29 @@ def run_idca(req: func.HttpRequest) -> func.HttpResponse:  # noqa: D401
         )
     logging.info("[IDCA WRAPPER] Storage configuration present")
 
+    required_runtime_envs = [
+        "PROJECT_ENDPOINT",
+        "MODEL_DEPLOYMENT",
+        "IDCA_AGENT_ID",
+        "DOC_INTELLIGENCE_ENDPOINT",
+        "DOC_INTELLIGENCE_KEY",
+    ]
+    missing_envs = [name for name in required_runtime_envs if not os.getenv(name)]
+    if missing_envs:
+        msg = f"Missing required IDCA environment variable(s): {', '.join(missing_envs)}"
+        logging.error(f"[IDCA WRAPPER] {msg}")
+        return func.HttpResponse(msg, status_code=500)
+
     # Directly import and run the IDCA agent
     # This ensures the Azure Function stays alive until the job is done
     try:
         from azure.data.tables import TableClient
         from datetime import datetime
+
+        logging.info("[IDCA WRAPPER] Importing idca.run_idca")
+        idca_module = importlib.import_module("idca")
+        idca_runner = getattr(idca_module, "run_idca")
+        logging.info("[IDCA WRAPPER] Import run_idca succeeded")
 
         table_client = TableClient.from_connection_string(STORAGE, "IngestionRequests")
         logging.info("[IDCA WRAPPER] TableClient initialized")
@@ -108,23 +126,6 @@ def run_idca(req: func.HttpRequest) -> func.HttpResponse:  # noqa: D401
             logging.error(f"[IDCA WRAPPER] Error checking/claiming job for {request_id}: {claim_err}", exc_info=True)
             return func.HttpResponse(f"Failed to claim IDCA job: {claim_err}", status_code=500)
 
-        required_runtime_envs = [
-            "PROJECT_ENDPOINT",
-            "MODEL_DEPLOYMENT",
-            "IDCA_AGENT_ID",
-            "AZURE_STORAGE_CONNECTION_STRING",
-        ]
-        missing_envs = [name for name in required_runtime_envs if not os.getenv(name) and not (name == "AZURE_STORAGE_CONNECTION_STRING" and os.getenv("AzureWebJobsStorage"))]
-        if missing_envs:
-            msg = f"Missing required IDCA environment variable(s): {', '.join(missing_envs)}"
-            logging.error(f"[IDCA WRAPPER] {msg}")
-            return func.HttpResponse(msg, status_code=500)
-
-        logging.info("[IDCA WRAPPER] Importing idca.run_idca")
-        idca_module = importlib.import_module("idca")
-        idca_runner = getattr(idca_module, "run_idca")
-        logging.info("[IDCA WRAPPER] Import run_idca succeeded")
-        
         logging.info(f"[IDCA WRAPPER] Starting IDCA logic directly for {request_id}")
         idca_runner(request_id, preclaimed=True)
         logging.info(f"[IDCA WRAPPER] IDCA logic completed for {request_id}")

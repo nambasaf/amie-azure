@@ -441,10 +441,6 @@ async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutput
     from search_orchestrator import progressive_search as parallel_progressive_search
 
     try:
-<<<<<<< Updated upstream
-        # Run async search directly
-        final_query, LoR = await parallel_progressive_search(search_query, target_total=5)
-=======
         use_deep_research = os.getenv("USE_DEEP_RESEARCH", "true").lower() in {
             "1",
             "true",
@@ -517,7 +513,6 @@ async def run_steps_8_to_12(manuscript_text: str, idca_output: str) -> NAAOutput
             merged.append(ref)
 
         LoR = merged[:search_target] if len(merged) > search_target else merged
->>>>>>> Stashed changes
 
         logging.info("\n[STEP 12 OUTPUT]")
         logging.info(f" PRIOR ART QUERY: {final_query if final_query else '(none)'}")

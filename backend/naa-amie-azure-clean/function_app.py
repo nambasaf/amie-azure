@@ -226,12 +226,8 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
         # 1. Run full NAA pipeline (Steps 8-12)
         # ------------------------------------------------------------------
         manuscript_text = get_manuscript_text(filename)
-<<<<<<< Updated upstream
-        # Fix: Await the async pipeline
-=======
         if not manuscript_text:
-            raise ValueError(f"No text extracted for request {request_id}") 
->>>>>>> Stashed changes
+            raise ValueError(f"No text extracted for request {request_id}")
         naa_outputs = await run_steps_8_to_12(manuscript_text, idca_output)
 
         # ------------------------------------------------------------------
@@ -288,7 +284,8 @@ async def run_novelty_analysis(req: func.HttpRequest) -> func.HttpResponse:
             "ss": asdict(naa_outputs.ss),
             "ssr": asdict(naa_outputs.ssr),
             "lor": filtered_lor if filtered_lor else naa_outputs.lor,
-            "source_citation": idca_output.get("source_citation", "Unknown"), # <--- PRESERVED FROM IDCA
+            "source_citation": idca_output.get("source_citation", "Unknown"),
+            "assessments": [],
         }
 
         if assessments:

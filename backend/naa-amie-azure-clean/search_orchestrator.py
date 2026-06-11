@@ -88,13 +88,9 @@ def split_ucs(ucs: str) -> List[str]:
     return blocks
 
 
-<<<<<<< Updated upstream
-async def progressive_search(ucs: str, target_total: int = 5) -> Tuple[str, List[dict]]:
-=======
 async def progressive_search(
     ucs: str, target_total: int = 250, openalex_query: str | None = None
 ) -> Tuple[str, List[dict]]:
->>>>>>> Stashed changes
     """
     Orchestrates the Progressive Search algorithm across ALL engines.
 
